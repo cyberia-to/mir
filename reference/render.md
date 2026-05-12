@@ -10,7 +10,7 @@ This spec depends on and cites:
 
 - [[cybergraph]] — `(P, N, L)`, axioms, adjacency operators
 - [[tri-kernel]] — diffusion $\mathcal{D}$, springs $\mathcal{S}$, heat $\mathcal{H}_\tau$
-- [[focus-flow]] — $\pi^*$ computation and local update rule
+- [[focus-flow]] — $\phi^*$ computation and local update rule
 - [[clifford]] — multivector primitive extensions, shifted geometric product
 - [[compiled transformers spec]] — CT-1.1 backbone for the T∞ tier
 
@@ -34,7 +34,7 @@ $$\mathcal{F}(\phi) = \lambda_s \!\left[\tfrac{1}{2}\phi^\top L\phi + \tfrac{\mu
 
 The elastic term $\frac{1}{2}\phi^\top L\phi$ is the discrete Dirichlet energy — the potential energy of the graph spring network. The screening term anchors focus against drift. The heat-alignment term enforces scale-consistent rendering. The KL term aligns focus with its own diffusion image, ensuring flow consistency. The world sits at the minimum of $\mathcal{F}$. Perturbations shift the minimum; the tri-kernel iteration rolls downhill.
 
-Focus $\pi^*$ is a conserved scalar field on the manifold: $\sum_p \pi^*(p) = 1$ at all times. Total luminosity is invariant; brightness flows between particles as the graph evolves but is never created or destroyed.
+Focus $\phi^*$ is a conserved scalar field on the manifold: $\sum_p \phi^*(p) = 1$ at all times. Total luminosity is invariant; brightness flows between particles as the graph evolves but is never created or destroyed.
 
 The cybergraph is therefore a world in the same mathematical sense that a Riemannian manifold with matter fields is a world — defined by its geometry ($\mathcal{L}$), its dynamics ([[tri-kernel]]), and its conserved quantities ([[focus]]). R-1.0 is a specification for an observer of that world.
 
@@ -75,15 +75,15 @@ Between epochs, positions and cluster IDs are frozen. Frames interpolate animate
 
 $$\begin{array}{l}
 \text{epoch } k: \\
-\quad (\pi^*, \phi^*) \leftarrow \text{tri-kernel}(\mathbb{G}_k) \quad \text{(see [[tri-kernel]])} \\
+\quad \phi^* \leftarrow \text{tri-kernel}(\mathbb{G}_k) \quad \text{(see [[tri-kernel]])} \\
 \quad X \leftarrow \text{spectral embed}(\mathbb{G}_k) \quad \text{(§3)} \\
 \quad X' \leftarrow \text{Procrustes align}(X, X_{\text{anchor}}) \quad \text{(§4)} \\
 \quad \mathrm{BVH} \leftarrow \text{build heat-kernel hierarchy}(X', \mathcal{H}_\tau) \quad \text{(§10)} \\
-\quad \mathrm{NRF} \leftarrow \text{train}(\mathbb{G}_k, X', \pi^*, \mathrm{CT\text{-}1.1\text{ model}}) \quad \text{(§7)} \\[0.5em]
+\quad \mathrm{NRF} \leftarrow \text{train}(\mathbb{G}_k, X', \phi^*, \mathrm{CT\text{-}1.1\text{ model}}) \quad \text{(§7)} \\[0.5em]
 \text{frame } t \in [k, k+1): \\
 \quad \mathrm{visible} \leftarrow \mathrm{cull}(X', \mathrm{BVH}, \mathrm{camera}) \\
 \quad \text{dispatch tiers T0..T∞ on } \mathrm{visible} \\
-\quad \text{animate } \pi^*(t), \text{diffusion flow} \\
+\quad \text{animate } \phi^*(t), \text{diffusion flow} \\
 \quad \mathrm{compose} \to \text{display surface}
 \end{array}$$
 
@@ -157,8 +157,8 @@ Every visual property derives from the graph or from derived fields. Metadata ov
 | property | derivation | notes |
 |---|---|---|
 | position | §3 (spectral embedding, aligned via §4) | $X'(p) \in \mathbb{R}^3$ |
-| radius | $r(p) = r_0 \cdot \sqrt{\pi^*(p)}$ | $r_0$ scene-scale constant |
-| luminosity | $\ell(p) = L_0 \cdot \pi^*(p)$ | conserved: $\sum_p \ell(p) = L_0$ |
+| radius | $r(p) = r_0 \cdot \sqrt{\phi^*(p)}$ | $r_0$ scene-scale constant |
+| luminosity | $\ell(p) = L_0 \cdot \phi^*(p)$ | conserved: $\sum_p \ell(p) = L_0$ |
 | hue | $h(p) = \theta(u_5(p), u_6(p))$ — angle of the 5th-6th eigenvector projection | schemaless cluster color |
 | saturation | proportional to $|w_2|$ per-axon (from [[clifford]] extended adjacency) | disagreement desaturates |
 | shape | sphere by default; upgraded from degree-role inference (hub / bridge / leaf) if requested | see §5.3 |
@@ -276,7 +276,7 @@ At each epoch:
 
 1. Sample $N_{\mathrm{train}} = 2^{16}$ points uniformly in $[{-}R_{\mathrm{scene}}, R_{\mathrm{scene}}]^3 \times [\tau_{\min}, \tau_{\max}]$.
 2. Compute ground truth $(\rho^*, c^*, f^*)$ from the cybergraph directly:
-   - $\rho^*(x, y, z, \tau) = \sum_p K_\tau(X'(p), (x, y, z)) \cdot \pi^*(p)$ where $K_\tau$ is a Gaussian kernel of width $\sqrt{\tau}$
+   - $\rho^*(x, y, z, \tau) = \sum_p K_\tau(X'(p), (x, y, z)) \cdot \phi^*(p)$ where $K_\tau$ is a Gaussian kernel of width $\sqrt{\tau}$
    - $c^*$ from §5.1 luminosity-weighted average of nearby particles
    - $f^*$ from diffusion gradient
 3. MSE loss on $(\rho, c, f)$, one Adam epoch ($\sim 8$ steps at 0.001).
@@ -350,14 +350,14 @@ For $\tau$ at four scales $\{\tau_0, 10\tau_0, 100\tau_0, 1000\tau_0\}$, compute
 
 Each BVH node stores:
 - AABB of contained particles
-- aggregated $\pi^*$ (luminosity sum, for T3 cluster billboards)
+- aggregated $\phi^*$ (luminosity sum, for T3 cluster billboards)
 - dominant cluster color (for T∞ far-field tinting)
 - child indices (up to 16 children per node)
 
 ### 10.2 Canonical label assignment
 
 Cluster IDs at each scale are canonicalized:
-1. Sort clusters by $\sum \pi^*$ descending.
+1. Sort clusters by $\sum \phi^*$ descending.
 2. Break ties by lowest CID of any member particle.
 3. Assign IDs $0, 1, 2, \ldots$ in that order.
 

@@ -30,7 +30,7 @@ pub enum GraphWorldState {
 // ---------------------------------------------------------------------------
 
 #[derive(Component)]
-pub(crate) struct LoadingOverlay;
+pub struct LoadingOverlay;
 
 // ---------------------------------------------------------------------------
 // OnEnter(GraphWorldState::Active)

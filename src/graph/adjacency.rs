@@ -20,6 +20,11 @@ pub struct Csr {
 }
 
 impl Csr {
+    /// Construct an empty CSR for a zero-particle graph.
+    pub fn empty() -> Self {
+        Self { n: 0, row_ptr: vec![0], col_idx: vec![], values: vec![] }
+    }
+
     /// Build symmetric CSR from cyberlinks. Two-pass: collect edges, then
     /// sort and deduplicate (parallel edges → weight += amount, then normalize).
     pub fn build<'a>(

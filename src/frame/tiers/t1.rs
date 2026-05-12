@@ -46,8 +46,6 @@ impl T1Pass {
         //   1. A world-space text entity parented to the particle.
         //   2. Positioned at center + radius offset along camera-facing axis.
         //   3. Culled automatically when the particle leaves T1 range.
-        //
-        // For now, log a trace so the path is exercised in tests.
         let _ = (positions, titles, camera, t1_particles.len());
     }
 }

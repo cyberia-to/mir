@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "R-1.0 world renderer: spectral layout + honeycrisp backend → deterministic 3D world"
 
+[features]
+default = []
+bevy-plugin = ["dep:bevy"]
+
 [dependencies]
 aruminium = { path = "../honeycrisp/aruminium" }
 acpu      = { path = "../honeycrisp/acpu" }
@@ -12,6 +16,7 @@ memmap2   = "0.9"
 thiserror = "2"
 serde     = { version = "1", features = ["derive"] }
 toml      = "0.8"
+bevy      = { version = "0.18", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

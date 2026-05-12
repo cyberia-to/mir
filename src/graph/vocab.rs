@@ -18,6 +18,11 @@ pub struct ParticleIndex {
 }
 
 impl ParticleIndex {
+    /// Construct an empty ParticleIndex with no particles.
+    pub fn empty() -> Self {
+        Self { map: HashMap::new(), hashes: Vec::new() }
+    }
+
     /// Build from a cyberlink iterator. Scans all `from` and `to` fields,
     /// assigns indices by first-seen block height.
     pub fn build<'a>(links: impl Iterator<Item = Cyberlink>) -> Self {

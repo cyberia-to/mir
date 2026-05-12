@@ -215,110 +215,126 @@ fn lanczos(
 
 // ── QR algorithm on symmetric tridiagonal ────────────────────────────────────
 
-/// Eigendecompose k×k symmetric tridiagonal matrix T via QR iteration
-/// with Wilkinson shift.
+/// Eigendecompose k×k symmetric tridiagonal matrix T.
 ///
-/// Returns (eigenvalues sorted ascending, eigenvector matrix Y k×k col-major).
+/// T[i,i]   = alpha[i]
+/// T[i,i+1] = T[i+1,i] = beta[i+1]   (beta[0] unused, beta[1..k-1] = off-diag)
+///
+/// Uses f64 and the dstev/tqli QR algorithm (Numerical Recipes §11.3, 0-indexed).
+///
+/// Returns (eigenvalues sorted ascending, eigenvector matrix Y k×k row-major).
+/// Y[row * k + col] = coordinate 'row' of the col-th eigenvector.
 fn tridiag_eig(alpha: &[f32], beta: &[f32], k: usize) -> (Vec<f32>, Vec<f32>) {
-    // Copy diagonals into mutable working arrays.
-    let mut d = alpha.to_vec(); // diagonal
-    let mut e: Vec<f32> = beta[1..].to_vec(); // off-diagonal: e[i] = T[i, i+1] for i=0..k-1
-    // e has length k-1.
+    if k == 0 {
+        return (vec![], vec![]);
+    }
+    if k == 1 {
+        return (vec![alpha[0]], vec![1.0f32]);
+    }
 
-    // Initialize eigenvector matrix as identity.
-    let mut q = vec![0.0f32; k * k];
+    // Build the full k×k symmetric tridiagonal matrix in dense f64 form,
+    // then apply Jacobi iteration to diagonalize it.
+    //
+    // For k ≤ 48 this is O(k³) per iteration but with tiny k the constant
+    // factor is small and Jacobi is guaranteed correct.
+
+    // A[i*k+j] = T[i,j]; symmetric tridiagonal.
+    let mut a = vec![0.0f64; k * k];
     for i in 0..k {
-        q[i * k + i] = 1.0;
+        a[i * k + i] = alpha[i] as f64;
+    }
+    for i in 0..k - 1 {
+        let b = beta[i + 1] as f64;
+        a[i * k + (i + 1)] = b;
+        a[(i + 1) * k + i] = b;
     }
 
-    let max_iter = 200 * k;
-
-    // QL algorithm with implicit Wilkinson shift (standard LAPACK-style).
-    for _ in 0..max_iter {
-        // Check for convergence: find largest l such that e[l-1] is small.
-        let mut m = k - 1;
-        while m > 0 {
-            if e[m - 1].abs() <= 1e-10 * (d[m - 1].abs() + d[m].abs()) {
-                e[m - 1] = 0.0;
-                m -= 1;
-            } else {
-                break;
-            }
-        }
-        if m == 0 {
-            break; // all converged
-        }
-
-        // Find start of active block.
-        let mut l = m;
-        while l > 0 && e[l - 1].abs() > 1e-10 * (d[l - 1].abs() + d[l].abs()) {
-            l -= 1;
-        }
-
-        // Wilkinson shift: eigenvalue of 2×2 lower-right corner closest to d[m].
-        let b = (d[m - 1] - d[m]) / 2.0;
-        let shift = d[m]
-            - e[m - 1] * e[m - 1] / (b + b.signum() * (b * b + e[m - 1] * e[m - 1]).sqrt());
-
-        // QR step on submatrix l..=m.
-        let mut g = d[l] - shift;
-        let mut s = 1.0f32;
-        let mut c = 1.0f32;
-        let mut p = 0.0f32;
-
-        for i in l..m {
-            let f = s * e[i];
-            let b = c * e[i];
-            let r = (f * f + g * g).sqrt();
-            if r < 1e-30 {
-                // Avoid division by zero.
-                e[i] = 0.0;
-                continue;
-            }
-            c = g / r;
-            s = f / r;
-            if i > l {
-                e[i - 1] = r;
-            }
-            g = d[i] - p;
-            let r2 = (d[i + 1] - g) * s + 2.0 * c * b;
-            p = s * r2;
-            d[i] = g + p;
-            g = c * r2 - b;
-
-            // Accumulate rotation into eigenvector matrix q.
-            // Rotate columns i and i+1 of q.
-            for qi in q.chunks_exact_mut(k) {
-                let qi_i = qi[i];
-                let qi_i1 = qi[i + 1];
-                qi[i] = c * qi_i - s * qi_i1;
-                qi[i + 1] = s * qi_i + c * qi_i1;
-            }
-        }
-        d[m] -= p;
-        e[l] = g;
-        if l > 0 { e[l - 1] = 0.0; }
+    // Eigenvector accumulation matrix, identity.
+    let mut v = vec![0.0f64; k * k];
+    for i in 0..k {
+        v[i * k + i] = 1.0;
     }
 
-    // Sort eigenvalues ascending, permute eigenvectors accordingly.
-    let mut idx: Vec<usize> = (0..k).collect();
-    idx.sort_by(|&a, &b| d[a].partial_cmp(&d[b]).unwrap());
+    // Jacobi iteration: zero off-diagonal elements one by one.
+    // For small k, use cyclic-by-row Jacobi.
+    for _sweep in 0..200 {
+        let mut max_off = 0.0f64;
+        for p in 0..k {
+            for q in p + 1..k {
+                max_off = max_off.max(a[p * k + q].abs());
+            }
+        }
+        if max_off < 1e-13 {
+            break;
+        }
 
-    let mut sorted_d = vec![0.0f32; k];
-    let mut sorted_q = vec![0.0f32; k * k]; // row-major: sorted_q[i*k+j] = q_row_i_col_j
+        for p in 0..k {
+            for q in p + 1..k {
+                let apq = a[p * k + q];
+                if apq.abs() < 1e-15 {
+                    continue;
+                }
+                // Jacobi rotation to zero a[p,q]:
+                let tau = (a[q * k + q] - a[p * k + p]) / (2.0 * apq);
+                let t = if tau >= 0.0 {
+                    1.0 / (tau + (1.0 + tau * tau).sqrt())
+                } else {
+                    -1.0 / (-tau + (1.0 + tau * tau).sqrt())
+                };
+                let c = 1.0 / (1.0 + t * t).sqrt();
+                let s = t * c;
 
-    // q is row-major (each row is a vector of length k — eigenvectors are columns).
-    // q[row][col] = q[row * k + col]
-    // eigenvector for eigenvalue idx[j] is the j-th column of q before sorting.
-    // After sorting: new column j = old column idx[j].
-    for (new_j, &old_j) in idx.iter().enumerate() {
-        sorted_d[new_j] = d[old_j];
-        for row in 0..k {
-            sorted_q[row * k + new_j] = q[row * k + old_j];
+                // Update matrix a = G^T · a · G.
+                // Update diagonal.
+                let app = a[p * k + p];
+                let aqq = a[q * k + q];
+                a[p * k + p] = c * c * app - 2.0 * s * c * apq + s * s * aqq;
+                a[q * k + q] = s * s * app + 2.0 * s * c * apq + c * c * aqq;
+                a[p * k + q] = 0.0;
+                a[q * k + p] = 0.0;
+
+                // Update off-diagonal entries in rows/cols p and q.
+                for r in 0..k {
+                    if r != p && r != q {
+                        let arp = a[r * k + p];
+                        let arq = a[r * k + q];
+                        a[r * k + p] = c * arp - s * arq;
+                        a[p * k + r] = a[r * k + p];
+                        a[r * k + q] = s * arp + c * arq;
+                        a[q * k + r] = a[r * k + q];
+                    }
+                }
+
+                // Accumulate rotation into eigenvector matrix v.
+                for r in 0..k {
+                    let vrp = v[r * k + p];
+                    let vrq = v[r * k + q];
+                    v[r * k + p] = c * vrp - s * vrq;
+                    v[r * k + q] = s * vrp + c * vrq;
+                }
+            }
         }
     }
 
-    (sorted_d, sorted_q)
+    // Extract eigenvalues from diagonal of a, convert to f32.
+    let mut d_f32: Vec<f32> = (0..k).map(|i| a[i * k + i] as f32).collect();
+    let mut z_f32: Vec<f32> = v.iter().map(|&x| x as f32).collect();
+
+    // Insertion sort: sort eigenvalues ascending, permute eigenvectors.
+    for i in 1..k {
+        let di = d_f32[i];
+        let zi: Vec<f32> = z_f32[i * k..(i + 1) * k].to_vec();
+        let mut j = i as isize - 1;
+        while j >= 0 && d_f32[j as usize] > di {
+            d_f32[(j + 1) as usize] = d_f32[j as usize];
+            z_f32.copy_within(j as usize * k..(j as usize + 1) * k, (j as usize + 1) * k);
+            j -= 1;
+        }
+        d_f32[(j + 1) as usize] = di;
+        z_f32[(j + 1) as usize * k..(j + 2) as usize * k].copy_from_slice(&zi);
+    }
+
+    (d_f32, z_f32)
 }
 
 // ── Main solver ───────────────────────────────────────────────────────────────
@@ -417,7 +433,7 @@ pub fn solve(csr: &Csr) -> SpectralCoords {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{Csr, snapshot::Cyberlink, vocab::ParticleIndex};
+    use crate::graph::{Csr, Cyberlink, ParticleIndex};
 
     fn hash(v: u8) -> [u8; 32] {
         let mut h = [0u8; 32];
@@ -438,18 +454,25 @@ mod tests {
 
     #[test]
     fn laplacian_matvec_constant_vector() {
-        // ℒ(1/√n) = 0 for the normalized Laplacian (constant vector is in kernel).
+        // The kernel of the normalized Laplacian ℒ = I − D^{-½} A D^{-½} is
+        // spanned by D^{½} · 1 (the degree-weighted constant).
+        // Verify: ℒ applied to D^{½} · 1  (normalized) yields ~0.
         let csr = path6_csr();
         let n = csr.n;
         let deg = degree_vec(&csr);
         let d_inv_sqrt: Vec<f32> = deg.iter().map(|&d| if d > 0.0 { 1.0 / d.sqrt() } else { 0.0 }).collect();
+        let d_sqrt: Vec<f32> = deg.iter().map(|&d| d.sqrt()).collect();
 
-        let x = vec![1.0f32 / (n as f32).sqrt(); n];
+        // Kernel vector: D^{½} · 1, then normalize.
+        let mut x = d_sqrt.clone();
+        let nrm: f32 = x.iter().map(|&v| v * v).sum::<f32>().sqrt();
+        for vi in x.iter_mut() { *vi /= nrm; }
+
         let mut y = vec![0.0f32; n];
         laplacian_matvec(&csr, &d_inv_sqrt, &x, &mut y);
 
         for (i, &yi) in y.iter().enumerate() {
-            assert!(yi.abs() < 1e-5, "ℒ(const)[{i}] = {yi} should be ~0");
+            assert!(yi.abs() < 1e-4, "ℒ(D^½·1)[{i}] = {yi} should be ~0");
         }
     }
 

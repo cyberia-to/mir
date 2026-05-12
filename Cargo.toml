@@ -1,0 +1,17 @@
+[package]
+name = "mir"
+version = "0.1.0"
+edition = "2021"
+description = "R-1.0 world renderer: spectral layout + honeycrisp backend → deterministic 3D world"
+
+[dependencies]
+aruminium = { path = "../honeycrisp/aruminium" }
+acpu      = { path = "../honeycrisp/acpu" }
+unimem    = { path = "../honeycrisp/unimem" }
+memmap2   = "0.9"
+thiserror = "2"
+serde     = { version = "1", features = ["derive"] }
+toml      = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

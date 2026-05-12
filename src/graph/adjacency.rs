@@ -8,7 +8,7 @@
 
 use crate::graph::{
     snapshot::Cyberlink,
-    vocab::{ParticleIdx, ParticleIndex},
+    vocab::ParticleIndex,
 };
 
 /// Compressed Sparse Row matrix (symmetric, f32 values).

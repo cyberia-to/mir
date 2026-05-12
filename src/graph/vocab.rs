@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::graph::snapshot::{CyberlinkIter, Cyberlink};
+use crate::graph::snapshot::Cyberlink;
 
 pub type ParticleIdx = u32;
 

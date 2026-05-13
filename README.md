@@ -61,9 +61,8 @@ mir is not the graph engine. it does not compute φ*, eigenvectors, or cyberank 
 
 ## specs
 
-- `tru/specs/render.md` — R-1.0 canonical protocol spec
-- `tru/specs/clifford.md` — Clifford extensions spec
-- `specs/render.md` — R-1.0-cyb: cyb implementation of R-1.0
+- `specs/render.md` — R-1.0 canonical protocol spec (Clifford primitives: [[compiled transformers spec]] §3)
+- `specs/render-cyb.md` — R-1.0-cyb: cyb implementation of R-1.0
 - `docs/plan.md` — implementation plan and architectural decisions
 
 ## implementation order (Phase 1)

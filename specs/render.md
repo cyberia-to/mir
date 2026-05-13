@@ -13,7 +13,7 @@ This spec depends on and cites:
 - [[cybergraph]] — `(P, N, L)`, axioms, adjacency operators
 - [[tri-kernel]] — diffusion $\mathcal{D}$, springs $\mathcal{S}$, heat $\mathcal{H}_\tau$
 - [[focus-flow]] — $\phi^*$ computation and local update rule
-- [[compiled transformers spec]] — CT-1 backbone for the T∞ tier; §3 defines multivector primitives and shifted geometric product
+- [[compiled transformers spec]] — CT-1 backbone for the T∞ tier; §2.5–§2.6 define multivector inputs; §7.7 shifted wedge; §8 Clifford block
 
 It does **not** depend on the [[crystal]] metadata schema. The engine renders pure topology by default; any metadata (domains, types, sizes) is consumed as a togglable overlay (§5.2).
 
@@ -161,7 +161,7 @@ Every visual property derives from the graph or from derived fields. Metadata ov
 | radius | $r(p) = r_0 \cdot \sqrt{\phi^*(p)}$ | $r_0$ scene-scale constant |
 | luminosity | $\ell(p) = L_0 \cdot \phi^*(p)$ | conserved: $\sum_p \ell(p) = L_0$ |
 | hue | $h(p) = \theta(u_5(p), u_6(p))$ — angle of the 5th-6th eigenvector projection | schemaless cluster color |
-| saturation | proportional to $|w_2|$ per-axon (from [[compiled transformers spec]] §3.4 extended adjacency) | disagreement desaturates |
+| saturation | proportional to $|w_2|$ per-axon (from [[compiled transformers spec]] §2.6 effective adjacency) | disagreement desaturates |
 | shape | sphere by default; upgraded from degree-role inference (hub / bridge / leaf) if requested | see §5.3 |
 | edge weight | $A^{\mathrm{eff}}_0(p, q)$ (scalar part) | line thickness |
 | edge flow direction | $P_{pq}$ (diffusion transition) + $\mathrm{sign}(A^{\mathrm{eff}}_2(p, q))$ | flow animation |
@@ -252,7 +252,7 @@ The head consists of:
 
 1. **Spatial positional encoding** — hash-grid encoding (Müller et al. 2022) with $L = 16$ levels, table size $2^{19}$ per level, feature dim 2. Output: 32-dim feature vector for any $(x, y, z, \tau)$.
 2. **Graph-context conditioning** — a small cross-attention layer between the spatial feature and the CT-1 model's last hidden state at the nearest $k = 8$ particles (found via the BVH in §10). This is where the trained graph-knowledge enters the render.
-3. **Clifford render block** — the shifted geometric product block from [[compiled transformers spec]] §3.5 and §9. Default shift set $S = \{1, 2, 4, 8, 16\}$.
+3. **Clifford render block** — the shifted geometric product block from [[compiled transformers spec]] §8 (Clifford(H,C;S) operator). Default shift set $S = \{1, 2, 4, 8, 16\}$.
 4. **Output head** — three linear projections to $\rho$ (via ReLU / softplus), $c$ (via sigmoid), $f$ (no activation, directional).
 
 Typical head parameter count: $< 4$ MB fp16. Fits in the ANE SRAM. The CT-1 model itself remains graph-resident and is queried by the head.
@@ -301,7 +301,7 @@ If the CT-1.1 model is unavailable (e.g., not yet compiled for $\mathbb{G}_k$), 
 
 ### 8.1 Representation
 
-Scalar edge weight $A^{\mathrm{eff}}_0(p, q)$ determines tube radius. Bivector $A^{\mathrm{eff}}_2(p, q)$ (from [[compiled transformers spec]] §3.4) determines directional flow polarity.
+Scalar edge weight $A^{\mathrm{eff}}_0(p, q)$ determines tube radius. Bivector $A^{\mathrm{eff}}_2(p, q)$ (from [[compiled transformers spec]] §2.6) determines directional flow polarity.
 
 ### 8.2 Flow animation
 
@@ -501,7 +501,7 @@ Primary reference implementation for R-1.0.
 Missing primitives to add (see [[honeycrisp]] roadmap):
 
 - `roll(tensor, shift, axis)` — cyclic channel shift, needed for §7 Clifford block and §13.1 trait
-- `shifted_inner`, `shifted_wedge`, `clifford_block` — fused kernels per [[compiled transformers spec]] §3.5
+- `shifted_inner`, `shifted_wedge`, `clifford_block` — fused kernels per [[compiled transformers spec]] §8
 - MetalFX upscaling integration — render at 0.5× resolution, reconstruct via temporal ML
 - EDR / P3 wide-color hooks for focus luminosity and cluster hue
 
@@ -585,6 +585,6 @@ Reserved for R-1.1 or later:
 - Koren, Y. *Drawing graphs by eigenvectors: theory and practice.* Computers & Mathematics with Applications, 2005.
 - Holten, D. *Hierarchical edge bundles.* IEEE TVCG, 2006.
 
-See [[cybergraph]] for primitives. See [[tri-kernel]] for the layout operators. See [[compiled transformers spec]] for the CT-1 backbone and §3 for multivector extensions and the shifted geometric product. See [[honeycrisp]] for the primary backend.
+See [[cybergraph]] for primitives. See [[tri-kernel]] for the layout operators. See [[compiled transformers spec]] for the CT-1 backbone; §2.5–§2.6 define multivector inputs, §7.7 the shifted wedge, §8 the Clifford block. See [[honeycrisp]] for the primary backend.
 
 discover all [[concepts]]

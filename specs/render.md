@@ -2,14 +2,14 @@
 spec: render
 version: R-1.0-cyb
 status: draft
-conforms-to: cybergraph/reference/render.md (R-1.0)
+conforms-to: tru/specs/render.md (R-1.0)
 alias: render, render spec, cyb render implementation
 ---
 
 # render — cyb implementation of R-1.0
 
 Cyb's implementation of the deterministic 3d rendering protocol defined in
-[[cybergraph]] `reference/render.md` (R-1.0). Every conforming neuron running
+[[render]] (`tru/specs/render.md`, R-1.0). Every conforming neuron running
 R-1.0 on the same graph state arrives at the same world; this document specifies
 how cyb produces that world.
 

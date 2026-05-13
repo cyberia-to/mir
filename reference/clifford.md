@@ -13,7 +13,7 @@ This spec defines:
 - the shifted geometric product as the native local operator (§5)
 - backward-compatibility contract for consumers that only read the scalar part (§6)
 
-Downstream consumers using these extensions: [[compiled transformers spec]] (CT-1.1 wedge-augmented attention and Clifford-block MLP), [[render]] (T∞ neural rendering via Clifford block).
+Downstream consumers using these extensions: [[compiled transformers spec]] (CT-1 wedge-augmented attention and Clifford-block MLP), [[render]] (T∞ neural rendering via Clifford block).
 
 See [[Ren]] for the Clifford language that emits these operations as [[nox]] jets. See [[tri-kernel]] for the scalar operators that remain unchanged. Wedge enhancement of [[springs]], syntropy, and [[cyberank]] is out of scope — deferred to a later pass.
 
@@ -81,7 +81,7 @@ The bivector $e_p \wedge e_q$ is oriented: swapping the endpoints flips the sign
 
 ### 3.4 Recovery of legacy form
 
-Any consumer that wants the scalar weight computes $w^{\star}_0(p, q)$ and ignores $w^{\star}_2(p, q)$. This preserves CT-1.0 ([[compiled transformers spec]] §§2–9) behavior exactly.
+Any consumer that wants the scalar weight computes $w^{\star}_0(p, q)$ and ignores $w^{\star}_2(p, q)$. This preserves the scalar CT-1 ([[compiled transformers spec]] §§2–9) behavior exactly.
 
 ---
 
@@ -121,8 +121,8 @@ The bivector part captures **oriented confidence**. When the market converges to
 
 ### 4.4 Downstream use
 
-- [[compiled transformers spec]] CT-1.0 reads $A^{\mathrm{eff}}_0$, discards $A^{\mathrm{eff}}_2$.
-- CT-1.1 reads both grades; bivector participates in wedge-augmented attention (§7).
+- [[compiled transformers spec]] CT-1 scalar path reads $A^{\mathrm{eff}}_0$, discards $A^{\mathrm{eff}}_2$ (when `wedge_attention = false`).
+- CT-1 Clifford path reads both grades; bivector participates in wedge-augmented attention (§7.7).
 - [[render]] T∞ reads both; bivector drives directional flow in the neural field.
 
 ---
@@ -162,7 +162,7 @@ The shifted geometric product compiles to two [[nox]] jets:
 - `shifted_inner_product` — extends the existing `geometric_product` jet used by `hull_attention` in nox
 - `shifted_wedge_product` — new jet; same arithmetic structure as `shifted_inner_product` with subtraction
 
-Reference shift set (default in CT-1.1 and render T∞):
+Reference shift set (default in CT-1 and render T∞):
 
 $$S = \{1, 2, 4, 8, 16\}$$
 
@@ -174,11 +174,11 @@ $$S = \{1, 2, 4, 8, 16\}$$
 
 ### 6.1 Scalar-only consumer contract
 
-A consumer is **CT-1.0-compatible** iff it reads $X^{\star}_0$ and discards $X^{\star}_2$ for every extended quantity. Such a consumer produces output byte-identical to the unextended [[cybergraph]] specification.
+A consumer is scalar-only iff it reads $X^{\star}_0$ and discards $X^{\star}_2$ for every extended quantity. Such a consumer produces output byte-identical to the unextended [[cybergraph]] specification.
 
 Specifically:
-- [[compiled transformers spec]] CT-1.0 is scalar-only: ignores $w_2$, $A^{\mathrm{eff}}_2$, and emits no Clifford jets.
-- CT-1.1 is multivector-aware: reads both grades and emits Clifford jets for attention and MLP replacement.
+- [[compiled transformers spec]] CT-1 scalar path (`wedge_attention = false`, `clifford_mlp = false`) ignores $w_2$, $A^{\mathrm{eff}}_2$, and emits no Clifford jets.
+- CT-1 Clifford path reads both grades and emits Clifford jets for attention and MLP replacement.
 
 ### 6.2 Storage and wire format
 
@@ -186,7 +186,7 @@ Extended quantities serialize as two adjacent sections:
 - scalar section: identical to legacy binary layout
 - bivector section: sparse CSR of `(i, j, coefficient)` triples, ordered by `(i, j)` lexicographically, omitted entirely when empty
 
-A `.graph` snapshot (see [[cyb-graph]]) with an empty bivector section is bit-identical to a legacy snapshot. CT-1.0 readers that do not know about the extension consume only the scalar section; the bivector section is skipped as an unknown extension per [[cyb-graph]] §extensions.
+A `.graph` snapshot (see [[cyb-graph]]) with an empty bivector section is bit-identical to a legacy snapshot. Scalar-only readers that do not know about the extension consume only the scalar section; the bivector section is skipped as an unknown extension per [[cyb-graph]] §extensions.
 
 ### 6.3 Hash invariance under scalar restriction
 
@@ -243,7 +243,7 @@ Reserved for a later extension pass, not specified here:
 - Hestenes, D. *Space-Time Algebra.* Gordon and Breach, 1966.
 - [[tri-kernel]] — scalar operators that remain unchanged.
 - [[cybergraph]] — axioms and legacy primitive definitions.
-- [[compiled transformers spec]] — CT-1.0 (scalar) and CT-1.1 (multivector) consumers.
+- [[compiled transformers spec]] — CT-1 consumers (scalar path and Clifford path).
 - [[render]] — T∞ neural rendering backbone.
 - [[nox]] — existing `geometric_product` jet in `hull_attention`.
 

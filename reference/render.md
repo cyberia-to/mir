@@ -12,7 +12,7 @@ This spec depends on and cites:
 - [[tri-kernel]] — diffusion $\mathcal{D}$, springs $\mathcal{S}$, heat $\mathcal{H}_\tau$
 - [[focus-flow]] — $\phi^*$ computation and local update rule
 - [[clifford]] — multivector primitive extensions, shifted geometric product
-- [[compiled transformers spec]] — CT-1.1 backbone for the T∞ tier
+- [[compiled transformers spec]] — CT-1 backbone for the T∞ tier
 
 It does **not** depend on the [[crystal]] metadata schema. The engine renders pure topology by default; any metadata (domains, types, sizes) is consumed as a togglable overlay (§5.2).
 
@@ -241,7 +241,7 @@ This is the tier that makes R-1.0 scale to unbounded graph size: rendering cost 
 
 ### 7.1 Architecture
 
-The neural radiance field is a rendering head attached to the [[compiled transformers spec]] CT-1.1 model of $\mathbb{G}$.
+The neural radiance field is a rendering head attached to the [[compiled transformers spec]] CT-1 model of $\mathbb{G}$.
 
 $$\mathrm{NRF}: (x, y, z, \tau) \to (\rho, c, f)$$
 
@@ -250,11 +250,11 @@ with $\rho \in \mathbb{R}_+$ density, $c \in \mathbb{R}^3$ RGB color, $f \in \ma
 The head consists of:
 
 1. **Spatial positional encoding** — hash-grid encoding (Müller et al. 2022) with $L = 16$ levels, table size $2^{19}$ per level, feature dim 2. Output: 32-dim feature vector for any $(x, y, z, \tau)$.
-2. **Graph-context conditioning** — a small cross-attention layer between the spatial feature and the CT-1.1 model's last hidden state at the nearest $k = 8$ particles (found via the BVH in §10). This is where the trained graph-knowledge enters the render.
+2. **Graph-context conditioning** — a small cross-attention layer between the spatial feature and the CT-1 model's last hidden state at the nearest $k = 8$ particles (found via the BVH in §10). This is where the trained graph-knowledge enters the render.
 3. **Clifford render block** — the shifted geometric product block from [[clifford]] §5 and [[compiled transformers spec]] §8.5. Default shift set $S = \{1, 2, 4, 8, 16\}$.
 4. **Output head** — three linear projections to $\rho$ (via ReLU / softplus), $c$ (via sigmoid), $f$ (no activation, directional).
 
-Typical head parameter count: $< 4$ MB fp16. Fits in the ANE SRAM. The CT-1.1 model itself remains graph-resident and is queried by the head.
+Typical head parameter count: $< 4$ MB fp16. Fits in the ANE SRAM. The CT-1 model itself remains graph-resident and is queried by the head.
 
 ### 7.2 Ray-march
 
@@ -584,6 +584,6 @@ Reserved for R-1.1 or later:
 - Koren, Y. *Drawing graphs by eigenvectors: theory and practice.* Computers & Mathematics with Applications, 2005.
 - Holten, D. *Hierarchical edge bundles.* IEEE TVCG, 2006.
 
-See [[cybergraph]] for primitives. See [[tri-kernel]] for the layout operators. See [[clifford]] for multivector extensions and the shifted geometric product. See [[compiled transformers spec]] for the CT-1.1 backbone. See [[honeycrisp]] for the primary backend.
+See [[cybergraph]] for primitives. See [[tri-kernel]] for the layout operators. See [[clifford]] for multivector extensions and the shifted geometric product. See [[compiled transformers spec]] for the CT-1 backbone. See [[honeycrisp]] for the primary backend.
 
 discover all [[concepts]]

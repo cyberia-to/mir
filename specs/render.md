@@ -13,7 +13,7 @@ This spec depends on and cites:
 - [[cybergraph]] — `(P, N, L)`, axioms, adjacency operators
 - [[tri-kernel]] — diffusion $\mathcal{D}$, springs $\mathcal{S}$, heat $\mathcal{H}_\tau$
 - [[focus-flow]] — $\phi^*$ computation and local update rule
-- [[compiled transformers spec]] — CT-1 backbone for the T∞ tier; §2.5–§2.6 define multivector inputs; §7.7 shifted wedge; §8 Clifford block
+- [[compiled transformers spec]] — CT-0 backbone for the T∞ tier; §2.5–§2.6 define multivector inputs; §7.7 shifted wedge; §8 Clifford block
 
 It does **not** depend on the [[crystal]] metadata schema. The engine renders pure topology by default; any metadata (domains, types, sizes) is consumed as a togglable overlay (§5.2).
 
@@ -80,7 +80,7 @@ $$\begin{array}{l}
 \quad X \leftarrow \text{spectral embed}(\mathbb{G}_k) \quad \text{(§3)} \\
 \quad X' \leftarrow \text{Procrustes align}(X, X_{\text{anchor}}) \quad \text{(§4)} \\
 \quad \mathrm{BVH} \leftarrow \text{build heat-kernel hierarchy}(X', \mathcal{H}_\tau) \quad \text{(§10)} \\
-\quad \mathrm{NRF} \leftarrow \text{train}(\mathbb{G}_k, X', \phi^*, \mathrm{CT\text{-}1.1\text{ model}}) \quad \text{(§7)} \\[0.5em]
+\quad \mathrm{NRF} \leftarrow \text{train}(\mathbb{G}_k, X', \phi^*, \mathrm{CT\text{-}0.1\text{ model}}) \quad \text{(§7)} \\[0.5em]
 \text{frame } t \in [k, k+1): \\
 \quad \mathrm{visible} \leftarrow \mathrm{cull}(X', \mathrm{BVH}, \mathrm{camera}) \\
 \quad \text{dispatch tiers T0..T∞ on } \mathrm{visible} \\
@@ -242,7 +242,7 @@ This is the tier that makes R-1.0 scale to unbounded graph size: rendering cost 
 
 ### 7.1 Architecture
 
-The neural radiance field is a rendering head attached to the [[compiled transformers spec]] CT-1 model of $\mathbb{G}$.
+The neural radiance field is a rendering head attached to the [[compiled transformers spec]] CT-0 model of $\mathbb{G}$.
 
 $$\mathrm{NRF}: (x, y, z, \tau) \to (\rho, c, f)$$
 
@@ -251,11 +251,11 @@ with $\rho \in \mathbb{R}_+$ density, $c \in \mathbb{R}^3$ RGB color, $f \in \ma
 The head consists of:
 
 1. **Spatial positional encoding** — hash-grid encoding (Müller et al. 2022) with $L = 16$ levels, table size $2^{19}$ per level, feature dim 2. Output: 32-dim feature vector for any $(x, y, z, \tau)$.
-2. **Graph-context conditioning** — a small cross-attention layer between the spatial feature and the CT-1 model's last hidden state at the nearest $k = 8$ particles (found via the BVH in §10). This is where the trained graph-knowledge enters the render.
+2. **Graph-context conditioning** — a small cross-attention layer between the spatial feature and the CT-0 model's last hidden state at the nearest $k = 8$ particles (found via the BVH in §10). This is where the trained graph-knowledge enters the render.
 3. **Clifford render block** — the shifted geometric product block from [[compiled transformers spec]] §8 (Clifford(H,C;S) operator). Default shift set $S = \{1, 2, 4, 8, 16\}$.
 4. **Output head** — three linear projections to $\rho$ (via ReLU / softplus), $c$ (via sigmoid), $f$ (no activation, directional).
 
-Typical head parameter count: $< 4$ MB fp16. Fits in the ANE SRAM. The CT-1 model itself remains graph-resident and is queried by the head.
+Typical head parameter count: $< 4$ MB fp16. Fits in the ANE SRAM. The CT-0 model itself remains graph-resident and is queried by the head.
 
 ### 7.2 Ray-march
 
@@ -293,7 +293,7 @@ Cross-neuron consistency: every neuron trains the NRF independently on its own s
 
 ### 7.5 Fall-back
 
-If the CT-1.1 model is unavailable (e.g., not yet compiled for $\mathbb{G}_k$), the NRF degrades to a hash-grid-only MLP without graph-context conditioning. This produces valid but less-informed T∞ rendering until the next CT-1.1 compile finishes.
+If the CT-0.1 model is unavailable (e.g., not yet compiled for $\mathbb{G}_k$), the NRF degrades to a hash-grid-only MLP without graph-context conditioning. This produces valid but less-informed T∞ rendering until the next CT-0.1 compile finishes.
 
 ---
 
@@ -543,7 +543,7 @@ On a defined reference hardware (M3 Pro or equivalent), the frame budget of §14
 
 ### 15.5 T∞ graph-size independence (P-RENDER-T∞)
 
-Frame time of a pure-T∞ view (all particles sub-pixel) is within 10% across snapshots of $10^6$ vs $10^9$ particles with the same CT-1.1 head size.
+Frame time of a pure-T∞ view (all particles sub-pixel) is within 10% across snapshots of $10^6$ vs $10^9$ particles with the same CT-0.1 head size.
 
 Results stored in a sidecar `r1_conformance.toml`:
 
@@ -585,6 +585,6 @@ Reserved for R-1.1 or later:
 - Koren, Y. *Drawing graphs by eigenvectors: theory and practice.* Computers & Mathematics with Applications, 2005.
 - Holten, D. *Hierarchical edge bundles.* IEEE TVCG, 2006.
 
-See [[cybergraph]] for primitives. See [[tri-kernel]] for the layout operators. See [[compiled transformers spec]] for the CT-1 backbone; §2.5–§2.6 define multivector inputs, §7.7 the shifted wedge, §8 the Clifford block. See [[honeycrisp]] for the primary backend.
+See [[cybergraph]] for primitives. See [[tri-kernel]] for the layout operators. See [[compiled transformers spec]] for the CT-0 backbone; §2.5–§2.6 define multivector inputs, §7.7 the shifted wedge, §8 the Clifford block. See [[honeycrisp]] for the primary backend.
 
 discover all [[concepts]]

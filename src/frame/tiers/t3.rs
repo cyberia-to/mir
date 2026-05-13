@@ -1,6 +1,5 @@
-//! T3 Gaussian splat: isotropic 3D Gaussian per Kerbl et al. 2023 (Phase 1).
+//! T3 Gaussian splat (§6.4): isotropic 3D Gaussian per Kerbl et al. 2023.
 //! CPU depth sort (viable ≤10K particles), GPU compute rasterises into pixel buffer.
-//! Step 6.
 
 use super::super::cull::{Camera, TierLevel};
 
@@ -145,6 +144,9 @@ pub struct T3Pass {
     queue:    aruminium::Queue,
 }
 
+unsafe impl Send for T3Pass {}
+unsafe impl Sync for T3Pass {}
+
 impl T3Pass {
     pub fn new() -> Result<Self, aruminium::GpuError> {
         let gpu      = aruminium::Gpu::open()?;
@@ -206,7 +208,7 @@ impl T3Pass {
             }
             d
         });
-        // Opacity: uniform 1.0 for Phase 1 (no opacity buffer in spec yet).
+        // Opacity: uniform 1.0 (spec §6.4 does not define a per-splat opacity buffer).
         let opacity_data: Vec<f32> = vec![1.0f32; n as usize];
 
         let pos_buf = self.gpu.buffer_with_data(cast_f32(&pos_data))?;

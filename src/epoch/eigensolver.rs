@@ -14,7 +14,8 @@ use crate::graph::Csr;
 /// Spectral coordinates: n particles × 3 eigenvectors (row-major f32).
 pub struct SpectralCoords {
     pub n: usize,
-    pub coords: Vec<f32>, // length n * 3
+    pub coords: Vec<f32>, // n×3 row-major (u₂,u₃,u₄)
+    pub extra: Vec<f32>,  // n×2 row-major (u₅,u₆) for hue; zeros if insufficient eigenvectors
 }
 
 impl SpectralCoords {
@@ -347,7 +348,7 @@ pub fn solve(csr: &Csr) -> SpectralCoords {
 
     if n < 4 {
         // Too small for spectral layout; return zeros.
-        return SpectralCoords { n, coords: vec![0.0f32; n * 3] };
+        return SpectralCoords { n, coords: vec![0.0f32; n * 3], extra: vec![0.0f32; n * 2] };
     }
 
     // Precompute D^{-½}.
@@ -365,7 +366,7 @@ pub fn solve(csr: &Csr) -> SpectralCoords {
     // Eigendecompose k×k tridiagonal.
     let (evals, evecs) = tridiag_eig(&alpha, &beta, k);
 
-    // Find 3 smallest non-trivial eigenvectors (skip λ ≈ 0).
+    // Find 5 smallest non-trivial eigenvectors (skip λ ≈ 0).
     // The first eigenvalue of the Laplacian is always 0 (constant vector).
     let mut selected: Vec<usize> = Vec::new();
     for j in 0..k {
@@ -376,14 +377,14 @@ pub fn solve(csr: &Csr) -> SpectralCoords {
             // Accept non-trivial eigenvalues ≥ 0
             selected.push(j);
         }
-        if selected.len() == 3 {
+        if selected.len() == 5 {
             break;
         }
     }
 
-    // Pad with the next available if fewer than 3 found.
+    // Pad with the next available if fewer than 5 found.
     for j in 0..k {
-        if selected.len() >= 3 {
+        if selected.len() >= 5 {
             break;
         }
         if !selected.contains(&j) {
@@ -395,16 +396,23 @@ pub fn solve(csr: &Csr) -> SpectralCoords {
     // v_basis is k*n (v_basis[j*n .. (j+1)*n] = v_j).
     // evecs is k*k row-major (evecs[row*k + col] = Y[row, col]).
     // X[:,i][p] = Σ_{j=0}^{k-1} v_j[p] * Y[j, selected[i]]
-    let mut coords = vec![0.0f32; n * 3];
-    for (dim, &col) in selected.iter().enumerate() {
+    let compute_ritz = |col: usize| -> Vec<f32> {
+        let mut vec = vec![0.0f32; n];
         for p in 0..n {
             let mut acc = 0.0f32;
             for j in 0..k {
-                // v_j[p] = v_basis[j*n + p]
-                // Y[j, col] = evecs[j*k + col]
                 acc += v_basis[j * n + p] * evecs[j * k + col];
             }
-            coords[p * 3 + dim] = acc;
+            vec[p] = acc;
+        }
+        vec
+    };
+
+    let mut coords = vec![0.0f32; n * 3];
+    for (dim, &col) in selected[..3.min(selected.len())].iter().enumerate() {
+        let ritz = compute_ritz(col);
+        for p in 0..n {
+            coords[p * 3 + dim] = ritz[p];
         }
     }
 
@@ -425,7 +433,22 @@ pub fn solve(csr: &Csr) -> SpectralCoords {
         }
     }
 
-    SpectralCoords { n, coords }
+    // Build extra (n×2) from selected[3] and selected[4] as Ritz vectors.
+    let mut extra = vec![0.0f32; n * 2];
+    if selected.len() >= 4 {
+        let ritz3 = compute_ritz(selected[3]);
+        for p in 0..n {
+            extra[p * 2] = ritz3[p];
+        }
+    }
+    if selected.len() >= 5 {
+        let ritz4 = compute_ritz(selected[4]);
+        for p in 0..n {
+            extra[p * 2 + 1] = ritz4[p];
+        }
+    }
+
+    SpectralCoords { n, coords, extra }
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────

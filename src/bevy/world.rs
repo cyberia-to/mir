@@ -1,162 +1,344 @@
-//! Graph world systems: OnEnter / Update / OnExit for the graph render world.
-//!
-//! TODO: When integrating into cyb/bevy, replace `GraphWorldState::Active` with
-//! `WorldState::Graph` from `cyb_bevy::worlds::WorldState` and remove the local
-//! `GraphWorldState` definition below.
+//! Graph world systems.
 
 use std::sync::{Arc, RwLock};
+use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 
-use super::components::{TierLevel, VisibleParticle};
-use super::resources::{EpochStateRes, GpuBuffers, GraphCamera};
+use crate::epoch::EpochWorker;
+use crate::frame::cull::TierLevel;
+use crate::frame::diffusion::diffusion_step;
 
-// ---------------------------------------------------------------------------
-// Local stand-in for WorldState::Graph.
-// Replace with cyb_bevy::worlds::WorldState::Graph when integrating into cyb.
-// ---------------------------------------------------------------------------
+use super::components::{TierLevel as CompTier, VisibleParticle};
+use super::resources::{EpochStateRes, GpuBuffers, GraphCamera, GraphWorldConfig, WarpTarget};
 
-/// Minimal FSM state used by the standalone mir plugin.
-/// When embedding in cyb/bevy, wire OnEnter/OnExit to WorldState::Graph instead.
 #[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum GraphWorldState {
-    #[default]
-    Inactive,
-    /// Equivalent to WorldState::Graph in the cyb/bevy shell.
-    Active,
-}
+pub enum GraphWorldState { #[default] Inactive, Active }
 
-// ---------------------------------------------------------------------------
-// Marker component for the loading overlay UI text entity.
-// ---------------------------------------------------------------------------
+#[derive(Component)] pub struct LoadingOverlay;
+#[derive(Component)] pub struct RenderOutput;
 
-#[derive(Component)]
-pub struct LoadingOverlay;
+// ── OnEnter ─────────────────────────────────────────────────────────────────
 
-// ---------------------------------------------------------------------------
-// OnEnter(GraphWorldState::Active)
-// ---------------------------------------------------------------------------
-
-pub fn on_enter_graph(mut commands: Commands) {
+pub fn on_enter_graph(
+    mut commands: Commands,
+    mut images:   ResMut<Assets<Image>>,
+    config:       Option<Res<GraphWorldConfig>>,
+) {
     info!("mir: entering graph world");
+    let w = 1280u32; let h = 720u32;
 
-    // 1. Spawn loading overlay.
+    // Create blank RGBA8 output image.
+    let mut image = Image::new(
+        Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        vec![20u8; (w * h * 4) as usize],
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    );
+    image.texture_descriptor.usage =
+        TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
+    let img_handle = images.add(image);
+
+    // Fullscreen render output (behind other UI).
     commands.spawn((
-        LoadingOverlay,
-        Text::new("loading graph…"),
-        TextFont {
-            font_size: 32.0,
+        RenderOutput,
+        ImageNode { image: img_handle.clone(), ..default() },
+        Node {
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            position_type: PositionType::Absolute,
             ..default()
         },
+        ZIndex(-1),
+    ));
+
+    // Loading overlay.
+    commands.spawn((
+        LoadingOverlay,
+        Text::new("loading graph\u{2026}"),
+        TextFont { font_size: 28.0, ..default() },
         TextColor(Color::WHITE),
         Node {
             position_type: PositionType::Absolute,
-            left:   Val::Px(20.0),
-            bottom: Val::Px(20.0),
+            left: Val::Px(20.0), bottom: Val::Px(20.0),
             ..default()
         },
     ));
 
-    // 2. Insert epoch / GPU resources.
-    //    Phase 1: EpochState starts as None; background thread fills it.
-    //    TODO: spawn EpochWorker thread here, pointing at the .graph mmap path.
-    let epoch_inner: Arc<RwLock<Option<crate::epoch::EpochState>>> =
+    let mut gpu = GpuBuffers::new();
+    gpu.viewport = [w, h];
+    gpu.output_image = Some(img_handle);
+
+    let epoch_arc: Arc<RwLock<Option<crate::epoch::EpochState>>> =
         Arc::new(RwLock::new(None));
 
-    commands.insert_resource(EpochStateRes { inner: epoch_inner });
+    if let Some(cfg) = config {
+        let vocab = Arc::new(crate::graph::ParticleIndex::empty());
+        gpu.csr = Some(Arc::clone(&cfg.graph));
+        let (_worker, state) = EpochWorker::spawn(Arc::clone(&cfg.graph), vocab);
+        commands.insert_resource(EpochStateRes { inner: state });
+    } else {
+        commands.insert_resource(EpochStateRes { inner: epoch_arc });
+    }
+
     commands.insert_resource(GraphCamera::default());
-    commands.insert_resource(GpuBuffers::default());
+    commands.insert_resource(gpu);
 }
 
-// ---------------------------------------------------------------------------
-// PreUpdate: swap epoch if the background thread produced a new one.
-// ---------------------------------------------------------------------------
+// ── PreUpdate ────────────────────────────────────────────────────────────────
 
 pub fn swap_epoch_if_ready(
-    mut gpu: ResMut<GpuBuffers>,
-    epoch_res: Res<EpochStateRes>,
-    loading_q: Query<Entity, With<LoadingOverlay>>,
+    mut gpu:      ResMut<GpuBuffers>,
+    epoch_res:    Res<EpochStateRes>,
+    loading_q:    Query<Entity, With<LoadingOverlay>>,
     mut commands: Commands,
 ) {
-    // Try to take a completed EpochState out of the Arc<RwLock<Option<…>>>.
-    let mut lock = match epoch_res.inner.try_write() {
-        Ok(l) => l,
-        Err(_) => return, // writer still active; try next frame
-    };
-
+    let mut lock = match epoch_res.inner.try_write() { Ok(l) => l, Err(_) => return };
     if let Some(epoch) = lock.take() {
-        // Upload to GPU (stub — real upload via aruminium follows in step 4).
-        gpu.n_particles = epoch.positions.len() / 3;
-        info!("mir: epoch swapped, {} particles", gpu.n_particles);
-
-        // Despawn loading overlay now that the first epoch is ready.
-        for entity in loading_q.iter() {
-            commands.entity(entity).despawn();
-        }
-
-        // Put the epoch back so other systems can read it this frame.
-        // (In step 4 the GPU buffers are the source of truth; CPU data is dropped.)
+        info!("mir: epoch swapped, {} particles", epoch.positions.len() / 3);
+        gpu.upload_epoch(&epoch);
+        for e in loading_q.iter() { commands.entity(e).despawn(); }
         *lock = Some(epoch);
     }
 }
 
-// ---------------------------------------------------------------------------
-// Update: per-frame systems (stubs; real implementations in steps 4–9).
-// ---------------------------------------------------------------------------
+// ── Update ───────────────────────────────────────────────────────────────────
 
-pub fn tick_diffusion(
-    _gpu: Res<GpuBuffers>,
-    _time: Res<Time>,
-) {
-    // TODO step 4: dispatch acpu diffusion compute shader for 1–2 PageRank steps.
+pub fn tick_diffusion(mut gpu: ResMut<GpuBuffers>) {
+    if gpu.n_particles == 0 { return }
+    let Some(csr) = gpu.csr.clone() else { return };
+    let d_inv = gpu.d_inv.clone();
+    diffusion_step(&csr, &d_inv, &mut gpu.focus);
 }
 
 pub fn sync_visible_entities(
-    _gpu: Res<GpuBuffers>,
-    _commands: Commands,
+    mut gpu:      ResMut<GpuBuffers>,
+    cam:          Res<GraphCamera>,
+    mut commands: Commands,
+    old_q:        Query<Entity, With<VisibleParticle>>,
 ) {
-    // TODO step 4: read visible_out buffer from cull pass, reconcile ECS entities.
-    // Spawn VisibleParticle + TierLevel for new particles, despawn removed ones.
-    let _ = (VisibleParticle(0), TierLevel(0)); // suppress unused-import warning
+    if gpu.n_particles == 0 { return }
+    let camera = cam.to_gpu_camera();
+
+    // Call CullPass with BVH buffer (or dummy if BVH not yet uploaded).
+    let visible = if let (Some(cull), Some(pb), Some(rb)) =
+        (&gpu.cull, &gpu.pos_buf, &gpu.rad_buf)
+    {
+        let bvh_ref = gpu.bvh_buf.as_ref().or(gpu.dummy_buf.as_ref());
+        let Some(bb) = bvh_ref else { return };
+        match cull.run(pb, rb, bb, &camera, gpu.n_particles as u32) {
+            Ok(vs) => vs.entries,
+            Err(e) => { warn!("cull: {e}"); return; }
+        }
+    } else { return };
+
+    for e in old_q.iter() { commands.entity(e).despawn(); }
+    for &(idx, tier) in &visible {
+        commands.spawn((VisibleParticle(idx), CompTier(tier as u8)));
+    }
+    gpu.visible = visible;
 }
 
-// ---------------------------------------------------------------------------
-// PostUpdate stubs
-// ---------------------------------------------------------------------------
+// ── PostUpdate ────────────────────────────────────────────────────────────────
 
-pub fn dispatch_tiers(_gpu: Res<GpuBuffers>) {
-    // TODO step 5–9: call CullPass::run, then T3/T2/T1/T0 passes.
+pub fn dispatch_tiers(
+    mut gpu: ResMut<GpuBuffers>,
+    cam:     Res<GraphCamera>,
+) {
+    if gpu.visible.is_empty() { return }
+    let camera = cam.to_gpu_camera();
+    let [w, h] = gpu.viewport;
+
+    // Read positions for CPU depth sort.
+    let positions: Vec<f32> = match &gpu.pos_buf {
+        Some(b) => b.read_f32(|s| s.to_vec()),
+        None => return,
+    };
+
+    let mut composite = vec![0.0f32; (w as usize) * (h as usize) * 4];
+
+    // T3 Gaussian splats (back-to-front sorted).
+    if let (Some(t3), Some(pb), Some(rb), Some(cb)) =
+        (&gpu.t3, &gpu.pos_buf, &gpu.rad_buf, &gpu.col_buf)
+    {
+        use crate::frame::tiers::t3::sort_by_depth;
+        let sorted = sort_by_depth(&gpu.visible, &positions, &camera);
+        if !sorted.is_empty() {
+            match t3.draw(&sorted, pb, rb, cb, &camera, [w, h]) {
+                Ok(pixels) => {
+                    let copy_len = composite.len().min(pixels.len());
+                    composite[..copy_len].copy_from_slice(&pixels[..copy_len]);
+                }
+                Err(e) => warn!("T3: {e}"),
+            }
+        }
+    }
+
+    // T2 sphere impostors (painted over T3).
+    if let (Some(t2), Some(pb), Some(rb), Some(cb)) =
+        (&gpu.t2, &gpu.pos_buf, &gpu.rad_buf, &gpu.col_buf)
+    {
+        if gpu.visible.iter().any(|(_, t)| *t == TierLevel::T2) {
+            match t2.draw(&gpu.visible, pb, rb, cb, &camera, [w, h]) {
+                Ok(pixels) => {
+                    // Alpha-composite T2 over T3: T2 pixel alpha in .w component.
+                    for (i, chunk) in pixels.chunks(4).enumerate() {
+                        if chunk.len() == 4 && chunk[3] > 0.5 {
+                            let base = i * 4;
+                            if base + 4 <= composite.len() {
+                                composite[base..base+4].copy_from_slice(chunk);
+                            }
+                        }
+                    }
+                }
+                Err(e) => warn!("T2: {e}"),
+            }
+        }
+    }
+
+    // §8 Edge rasterization (T1/T2/T3 visible edges).
+    if let (Some(el), Some(pb), Some(csr)) =
+        (&gpu.edge_line, &gpu.pos_buf, &gpu.csr)
+    {
+        // Build visible particle set.
+        let vis_set: std::collections::HashSet<u32> =
+            gpu.visible.iter().map(|&(idx, _)| idx).collect();
+
+        // Gather edges between visible particles.
+        let mut edge_list: Vec<(u32, u32)> = Vec::new();
+        let flow_offs = gpu.edge.flow_offsets().to_vec();
+        let mut weights: Vec<f32> = Vec::new();
+
+        for &p in &vis_set {
+            let (cols, vals) = csr.row(p as usize);
+            for (&q, &w) in cols.iter().zip(vals.iter()) {
+                if q > p && vis_set.contains(&q) {
+                    edge_list.push((p, q));
+                    weights.push(w);
+                }
+            }
+        }
+
+        // Resize EdgePass flow offsets if needed.
+        // (flow_offs already grabbed; resize separately since we have &gpu.edge_line)
+        let n_edges = edge_list.len();
+        let flow_uvs: Vec<f32> = (0..n_edges)
+            .map(|i| if i < flow_offs.len() { flow_offs[i] } else { 0.0 })
+            .collect();
+
+        let vp = cam.view_proj();
+        if !edge_list.is_empty() {
+            let _ = el.rasterize(
+                &mut composite,
+                &edge_list,
+                pb,
+                &weights,
+                &flow_uvs,
+                &vp,
+                [w, h],
+            );
+        }
+    }
+
+    // T∞ background fill (§6.5): τ-tinted gradient via TInfPass (GPU).
+    // For neural background, use NrfState from epoch; cpu_ray_march for cpu-reference path.
+    // Use cluster-0 color from the focus array as dominant tint.
+    let cluster_tint = if !gpu.focus.is_empty() && gpu.col_buf.is_some() {
+        let cb = gpu.col_buf.as_ref().unwrap();
+        cb.read_f32(|s| {
+            if s.len() >= 3 { [s[0], s[1], s[2], 1.0] } else { [0.02, 0.02, 0.06, 1.0] }
+        })
+    } else {
+        [0.02, 0.02, 0.06, 1.0]
+    };
+
+    if let Some(tinf) = &gpu.tinf {
+        let _ = tinf.fill_background(&mut composite, cluster_tint, cam.tau, [w, h]);
+    } else {
+        // CPU fallback: fill transparent pixels with a dark blue background.
+        for chunk in composite.chunks_mut(4) {
+            if chunk[3] < 0.5 {
+                let [r, g, b, _] = [0.02f32, 0.02, 0.06, 1.0];
+                chunk[0] = r; chunk[1] = g; chunk[2] = b; chunk[3] = 1.0;
+            }
+        }
+    }
+
+    gpu.last_pixels = Some(composite);
 }
 
-pub fn animate_edges(_gpu: Res<GpuBuffers>, _time: Res<Time>) {
-    // TODO step 9: update EdgePass flow UVs and dispatch tube geometry compute.
+pub fn animate_edges(mut gpu: ResMut<GpuBuffers>, time: Res<Time>) {
+    let n = gpu.edge.flow_offsets().len();
+    if n == 0 { return }
+    let weights = vec![0.5f32; n];
+    gpu.edge.update_flow_uvs(&weights, time.delta_secs());
 }
 
-pub fn composite(_gpu: Res<GpuBuffers>) {
-    // TODO step 7+: IOSurface composite via unimem zero-copy.
+pub fn composite(
+    gpu:        Res<GpuBuffers>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let (Some(pixels), Some(handle)) = (&gpu.last_pixels, &gpu.output_image) else { return };
+    let Some(image) = images.get_mut(handle) else { return };
+    let Some(data)  = &mut image.data else { return };
+
+    let [w, h] = gpu.viewport;
+    let expected = (w as usize) * (h as usize) * 4;
+    if data.len() != expected || pixels.len() < expected { return }
+
+    for (dst, &src) in data.iter_mut().zip(pixels.iter()) {
+        *dst = (src.clamp(0.0, 1.0) * 255.0) as u8;
+    }
 }
 
-// ---------------------------------------------------------------------------
-// OnExit(GraphWorldState::Active)
-// ---------------------------------------------------------------------------
+// ── OnExit ────────────────────────────────────────────────────────────────────
 
 pub fn on_exit_graph(
     mut commands: Commands,
-    particles_q: Query<Entity, With<VisibleParticle>>,
-    loading_q:   Query<Entity, With<LoadingOverlay>>,
+    particles_q:  Query<Entity, With<VisibleParticle>>,
+    loading_q:    Query<Entity, With<LoadingOverlay>>,
+    render_q:     Query<Entity, With<RenderOutput>>,
 ) {
     info!("mir: exiting graph world");
+    for e in particles_q.iter() { commands.entity(e).despawn(); }
+    for e in loading_q.iter()   { commands.entity(e).despawn(); }
+    for e in render_q.iter()    { commands.entity(e).despawn(); }
+}
 
-    // Despawn all visible particle entities.
-    for entity in particles_q.iter() {
-        commands.entity(entity).despawn();
-    }
-    // Despawn any lingering loading overlay.
-    for entity in loading_q.iter() {
-        commands.entity(entity).despawn();
-    }
+/// §9.4 Follow-flow: hold Alt to ride the attention current.
+/// Biases camera velocity toward the strongest outgoing neighbor of the nearest particle.
+pub fn follow_flow_system(
+    mut cam:  ResMut<GraphCamera>,
+    gpu:      Res<GpuBuffers>,
+    keys:     Res<ButtonInput<KeyCode>>,
+    time:     Res<Time>,
+) {
+    use super::camera::apply_follow_flow;
+    let held = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
+    if !held { return; }
+    let Some(csr) = &gpu.csr else { return };
+    let Some(pb)  = &gpu.pos_buf else { return };
+    if gpu.n_particles == 0 { return; }
+    let positions = pb.read_f32(|s| s.to_vec());
+    apply_follow_flow(&mut cam, true, &positions, csr, time.delta_secs());
+}
 
-    // NOTE: EpochStateRes is intentionally retained across exit
-    // because eigenvector computation is expensive and the next
-    // WorldState::Graph entry can reuse the existing layout.
-    // GpuBuffers and GraphCamera are similarly retained.
+/// §9.2 warp: consume the WarpTarget resource and initiate camera animation.
+pub fn warp_to_system(
+    mut cam:    ResMut<GraphCamera>,
+    mut target: ResMut<WarpTarget>,
+    gpu:        Res<GpuBuffers>,
+) {
+    use super::camera::initiate_warp;
+    let Some(idx) = target.particle_idx.take() else { return };
+    let Some(pb)  = &gpu.pos_buf else { return };
+    let Some(rb)  = &gpu.rad_buf else { return };
+    let base = idx as usize * 3;
+    let center = pb.read_f32(|s| {
+        if base + 2 < s.len() { [s[base], s[base+1], s[base+2]] } else { [0.0f32; 3] }
+    });
+    let radius = rb.read_f32(|rs| if (idx as usize) < rs.len() { rs[idx as usize] } else { 10.0 });
+    let cam_pos = [center[0], center[1], center[2] + radius * 3.0];
+    initiate_warp(&mut cam, cam_pos, center);
 }

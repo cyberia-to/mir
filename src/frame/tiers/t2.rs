@@ -1,7 +1,6 @@
-//! T2 analytic sphere impostor: compute shader ray-casts analytic spheres,
+//! T2 analytic sphere impostor (§6.3): compute shader ray-casts analytic spheres,
 //! writes RGBA f32 pixels into a shared output buffer.
-//! aruminium is compute-only (Phase 1), so we use a compute kernel instead
-//! of a vertex+fragment pipeline.  Step 5.
+//! aruminium provides compute-only Metal access; vertex+fragment pipelines are not used.
 
 use super::super::cull::{Camera, TierLevel};
 
@@ -168,6 +167,9 @@ pub struct T2Pass {
     pipeline: aruminium::Pipeline,
     queue:    aruminium::Queue,
 }
+
+unsafe impl Send for T2Pass {}
+unsafe impl Sync for T2Pass {}
 
 impl T2Pass {
     pub fn new() -> Result<Self, aruminium::GpuError> {

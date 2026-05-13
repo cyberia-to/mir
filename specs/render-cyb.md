@@ -28,8 +28,8 @@ Bevy shell as `WorldState::Graph`.
 | §6.2 T1 surface + label | Phase 1 | planned |
 | §6.3 T2 analytic impostor | Phase 1 | planned |
 | §6.4 T3 Gaussian splat | Phase 1 | planned |
-| §7 T∞ NRF — hash-grid MLP only, no CT-1.1 (§7.5 fallback) | Phase 2 | deferred |
-| §7 T∞ NRF — full CT-1.1 backbone + Clifford block | Phase 3 | deferred |
+| §7 T∞ NRF — hash-grid MLP only, no CT-0.1 (§7.5 fallback) | Phase 2 | deferred |
+| §7 T∞ NRF — full CT-0.1 backbone + Clifford block | Phase 3 | deferred |
 | §8 edges + heat-kernel bundling | Phase 1 | planned |
 | §9 navigation (warp, portal-step, follow-flow) | Phase 1 | planned |
 | §10 heat-kernel BVH (four τ scales) | Phase 1 | planned |
@@ -165,10 +165,10 @@ transition band; cross-fades with T∞ at the 1 px boundary.
 
 #### T∞ — deferred
 
-Phase 2: hash-grid-only MLP (Müller 2022, Instant NGP), no CT-1.1 conditioning.
+Phase 2: hash-grid-only MLP (Müller 2022, Instant NGP), no CT-0.1 conditioning.
 Valid per R-1.0 §7.5 fallback; produces correct world at reduced quality.
 
-Phase 3: full NRF — CT-1.1 cross-attention conditioning, Clifford render block
+Phase 3: full NRF — CT-0.1 cross-attention conditioning, Clifford render block
 (shifted geometric product), volume ray-march 128 samples/pixel, depth-varying τ.
 
 Until Phase 2: sub-pixel particles render as luminosity-weighted point splats.

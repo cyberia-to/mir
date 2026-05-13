@@ -81,8 +81,8 @@ mir is not the graph engine. it does not compute φ*, eigenvectors, or cyberank 
 | 10 | `frame/tiers/t0` | content entry: camera transition + sandbox |
 | 11 | conformance | P-RENDER-TOPO, P-RENDER-POS, P-RENDER-FPS |
 
-Phase 2: T∞ hash-grid MLP (no CT-1.1).
-Phase 3: T∞ full NRF — CT-1.1 + Clifford block + volume ray-march.
+Phase 2: T∞ hash-grid MLP (no CT-0.1).
+Phase 3: T∞ full NRF — CT-0.1 + Clifford block + volume ray-march.
 
 ## in the stack
 

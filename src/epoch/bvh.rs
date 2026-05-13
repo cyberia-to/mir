@@ -4,7 +4,8 @@
 //! spatial grid on their spectral coordinates, dividing the [-1000,1000]³
 //! bounding box into cells whose size scales as √τ. Each cell = one cluster.
 //!
-//! Phase 1: spatial grid clustering (not Chebyshev — that is Phase 2).
+//! Current implementation: spatial grid clustering. §10.1 specifies heat-kernel
+//! diffusion-distance clustering (Chebyshev), which requires the full tri-kernel.
 //!
 //! BvhNode tree is built bottom-up from the finest-scale clusters.
 
@@ -13,16 +14,21 @@ use crate::epoch::eigensolver::SpectralCoords;
 pub const TAU_SCALES: [f32; 4] = [1.0, 10.0, 100.0, 1000.0];
 
 /// One node in the BVH tree.
-#[derive(Default, Clone)]
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
 pub struct BvhNode {
-    pub aabb_min: [f32; 3],
-    pub aabb_max: [f32; 3],
-    pub focus_sum: f32,
-    pub child_start: u32, // index into nodes array
-    pub child_count: u8,
+    pub aabb_min:    [f32; 3],  // 12 bytes
+    pub focus_sum:   f32,        //  4 bytes  ← moved before aabb_max for GPU alignment
+    pub aabb_max:    [f32; 3],  // 12 bytes
+    pub child_start: u32,        //  4 bytes
+    pub child_count: u32,        //  4 bytes  ← was u8, now u32
+    pub is_leaf:     u32,        //  4 bytes  (1=leaf, 0=internal)
+    pub leaf_start:  u32,        //  4 bytes  (first particle idx in leaf)
+    pub leaf_count:  u32,        //  4 bytes  (particle count in leaf)
 }
 
 /// Acceleration structure with 4-level cluster hierarchy.
+#[derive(Clone)]
 pub struct Bvh {
     pub nodes: Vec<BvhNode>,
     /// Per-particle cluster ID at each τ scale (4 levels).
@@ -82,6 +88,45 @@ fn aabb_empty() -> ([f32; 3], [f32; 3]) {
 
 // ── BVH builder ───────────────────────────────────────────────────────────────
 
+// ── Canonical cluster label assignment (§10.2) ────────────────────────────────
+
+fn canonicalize_ids(ids: &mut Vec<u32>, focus: &[f32]) -> u32 {
+    let max_id = ids.iter().copied().max().unwrap_or(0);
+    let n_clusters = (max_id as usize) + 1;
+
+    let mut cluster_focus = vec![0.0f32; n_clusters];
+    let mut cluster_min_p = vec![usize::MAX; n_clusters];
+
+    for (p, &cid) in ids.iter().enumerate() {
+        let c = cid as usize;
+        if c < n_clusters {
+            cluster_focus[c] += focus.get(p).copied().unwrap_or(0.0);
+            cluster_min_p[c] = cluster_min_p[c].min(p);
+        }
+    }
+
+    // Sort clusters: by -focus (descending), then by min_particle (ascending).
+    let mut order: Vec<usize> = (0..n_clusters).collect();
+    order.sort_by(|&a, &b| {
+        cluster_focus[b].partial_cmp(&cluster_focus[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(cluster_min_p[a].cmp(&cluster_min_p[b]))
+    });
+
+    // Build remap: old_id → new_id
+    let mut remap = vec![0u32; n_clusters];
+    for (new_id, &old_id) in order.iter().enumerate() {
+        remap[old_id] = new_id as u32;
+    }
+
+    // Apply remap.
+    for cid in ids.iter_mut() {
+        *cid = remap[*cid as usize];
+    }
+
+    max_id
+}
+
 /// Build the BVH from spectral coordinates and per-particle focus weights.
 ///
 /// Returns a Bvh with nodes covering 4 τ scales and per-particle cluster IDs.
@@ -93,7 +138,8 @@ pub fn build(coords: &SpectralCoords, focus: &[f32]) -> Bvh {
     let mut all_level_ids: [Vec<u32>; 4] = std::array::from_fn(|_| Vec::new());
 
     for (level, &tau) in TAU_SCALES.iter().enumerate() {
-        let ids = grid_cluster(coords, tau);
+        let mut ids = grid_cluster(coords, tau);
+        canonicalize_ids(&mut ids, focus);
         for p in 0..n {
             cluster_ids[p][level] = ids[p];
         }
@@ -118,11 +164,15 @@ pub fn build(coords: &SpectralCoords, focus: &[f32]) -> Bvh {
     let n_c0 = ids0.iter().copied().max().map(|m| m + 1).unwrap_or(0) as usize;
     let offset0 = 0usize;
 
-    // Initialize level-0 nodes.
+    // Initialize level-0 nodes (leaves).
     let mut l0_nodes: Vec<BvhNode> = (0..n_c0)
         .map(|_| {
             let (mn, mx) = aabb_empty();
-            BvhNode { aabb_min: mn, aabb_max: mx, focus_sum: 0.0, child_start: 0, child_count: 0 }
+            BvhNode {
+                aabb_min: mn, focus_sum: 0.0, aabb_max: mx,
+                child_start: 0, child_count: 0,
+                is_leaf: 1, leaf_start: 0, leaf_count: 0,
+            }
         })
         .collect();
 
@@ -152,10 +202,13 @@ pub fn build(coords: &SpectralCoords, focus: &[f32]) -> Bvh {
                 let (mn, mx) = aabb_empty();
                 BvhNode {
                     aabb_min: mn,
-                    aabb_max: mx,
                     focus_sum: 0.0,
+                    aabb_max: mx,
                     child_start: 0,
                     child_count: 0,
+                    is_leaf: 0,
+                    leaf_start: 0,
+                    leaf_count: 0,
                 }
             })
             .collect();
@@ -196,13 +249,13 @@ pub fn build(coords: &SpectralCoords, focus: &[f32]) -> Bvh {
         }
 
         // Store children as contiguous ranges: collect into a flat children array.
-        // For simplicity (Phase 1), store child_start as the first child's node index
+        // Store child_start as the first child's node index
         // and child_count as number of children (capped at 255).
         for cid in 0..n_cur {
             let children = &children_map[cid];
             if !children.is_empty() {
                 cur_nodes[cid].child_start = children[0];
-                cur_nodes[cid].child_count = children.len().min(255) as u8;
+                cur_nodes[cid].child_count = children.len() as u32;
             }
         }
 
@@ -227,7 +280,7 @@ mod tests {
         for p in pts {
             coords.extend_from_slice(p);
         }
-        SpectralCoords { n, coords }
+        SpectralCoords { n, coords, extra: vec![0.0f32; n * 2] }
     }
 
     #[test]

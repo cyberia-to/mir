@@ -44,6 +44,10 @@ pub struct CullPass {
     queue:    aruminium::Queue,
 }
 
+// SAFETY: Metal objects are thread-safe per Metal documentation.
+unsafe impl Send for CullPass {}
+unsafe impl Sync for CullPass {}
+
 impl CullPass {
     pub fn new() -> Result<Self, aruminium::GpuError> {
         let gpu   = aruminium::Gpu::open()?;

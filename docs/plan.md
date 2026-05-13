@@ -58,16 +58,16 @@ atomically on epoch arrival. The eigensolver is never on the render thread.
 The R-1.0 T∞ tier requires:
 - per-epoch NRF training (not just inference — actual gradient steps at runtime)
 - Instant-NGP hash-grid encoding (Müller 2022) with 16 levels × 2^19 entries
-- CT-1.1 cross-attention conditioning (graph-context per nearest k=8 particles)
+- CT-0.1 cross-attention conditioning (graph-context per nearest k=8 particles)
 - Clifford render block (shifted geometric product — kernels not yet in honeycrisp)
 - volume ray-march (128 samples/pixel, depth-varying τ)
 
 This is months of work. R-1.0 §7.5 explicitly provides a fallback: "hash-grid-only
-MLP without CT-1.1" is a valid conforming T∞ until the full implementation ships.
+MLP without CT-0.1" is a valid conforming T∞ until the full implementation ships.
 
 Phase 1 uses luminosity-weighted point splats for sub-pixel particles.
-Phase 2 delivers hash-grid MLP (no CT-1.1).
-Phase 3 delivers full T∞ with CT-1.1 + Clifford block.
+Phase 2 delivers hash-grid MLP (no CT-0.1).
+Phase 3 delivers full T∞ with CT-0.1 + Clifford block.
 
 ### Streaming by proximity — omitted
 
@@ -170,5 +170,5 @@ in `render`. Render imports computed positions and focus as inputs. This is the
 | 10 | `render::frame::tiers::t0` | content entry: camera transition + sandbox |
 | 11 | conformance | P-RENDER-TOPO, P-RENDER-POS, P-RENDER-FPS |
 
-Phase 2: T∞ hash-grid MLP (no CT-1.1).
-Phase 3: T∞ full NRF — CT-1.1 + Clifford block + volume ray-march.
+Phase 2: T∞ hash-grid MLP (no CT-0.1).
+Phase 3: T∞ full NRF — CT-0.1 + Clifford block + volume ray-march.

@@ -249,7 +249,7 @@ pub fn align(coords: &mut SpectralCoords, anchor_ref: &[[f32; 3]]) {
     }
 
     // SVD of M = U S V^T.
-    let (u, _, v) = jacobi_svd_3x3(cross_cov);
+    let (u, sigma, v) = jacobi_svd_3x3(cross_cov);
 
     // Q = V U^T (optimal rotation).
     let ut = mat3_transpose(&u);
@@ -264,7 +264,37 @@ pub fn align(coords: &mut SpectralCoords, anchor_ref: &[[f32; 3]]) {
         q = mat3_mul(&v_corr, &ut);
     }
 
-    apply_rotation(&mut coords.coords, q);
+    // Optimal scale s = trace(Sigma) / trace(A^T A) where A = centered anchor current coords
+    let trace_s: f32 = sigma[0] + sigma[1] + sigma[2];
+    let trace_ata: f32 = (0..m_anchors).map(|p| {
+        let cur = coords.position(p);
+        let a = [cur[0]-centroid_cur[0], cur[1]-centroid_cur[1], cur[2]-centroid_cur[2]];
+        a[0]*a[0] + a[1]*a[1] + a[2]*a[2]
+    }).sum::<f32>();
+    let s = if trace_ata > 1e-10 { trace_s / trace_ata } else { 1.0f32 };
+
+    // Translation t = centroid_ref - s * Q * centroid_cur
+    let qc = [
+        q[0][0]*centroid_cur[0] + q[0][1]*centroid_cur[1] + q[0][2]*centroid_cur[2],
+        q[1][0]*centroid_cur[0] + q[1][1]*centroid_cur[1] + q[1][2]*centroid_cur[2],
+        q[2][0]*centroid_cur[0] + q[2][1]*centroid_cur[1] + q[2][2]*centroid_cur[2],
+    ];
+    let t = [
+        centroid_ref[0] - s * qc[0],
+        centroid_ref[1] - s * qc[1],
+        centroid_ref[2] - s * qc[2],
+    ];
+
+    // Apply full transform to ALL n particles: X'(p) = s*Q*X(p) + t
+    let n = coords.n;
+    for i in 0..n {
+        let x = coords.coords[i*3];
+        let y = coords.coords[i*3+1];
+        let z = coords.coords[i*3+2];
+        coords.coords[i*3]   = s*(q[0][0]*x + q[0][1]*y + q[0][2]*z) + t[0];
+        coords.coords[i*3+1] = s*(q[1][0]*x + q[1][1]*y + q[1][2]*z) + t[1];
+        coords.coords[i*3+2] = s*(q[2][0]*x + q[2][1]*y + q[2][2]*z) + t[2];
+    }
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -279,7 +309,7 @@ mod tests {
         for p in positions {
             coords.extend_from_slice(p);
         }
-        crate::epoch::eigensolver::SpectralCoords { n, coords }
+        crate::epoch::eigensolver::SpectralCoords { n, coords, extra: vec![0.0f32; n * 2] }
     }
 
     #[test]

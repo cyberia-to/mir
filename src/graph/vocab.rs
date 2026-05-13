@@ -26,14 +26,14 @@ impl ParticleIndex {
     /// Build from a cyberlink iterator. Scans all `from` and `to` fields,
     /// assigns indices by first-seen block height.
     pub fn build<'a>(links: impl Iterator<Item = Cyberlink>) -> Self {
-        // Phase 1: collect first-seen block height for each particle hash.
+        // Collect first-seen block height for each particle hash.
         let mut first_seen: HashMap<[u8; 32], u64> = HashMap::new();
         for link in links {
             first_seen.entry(link.from).or_insert(link.block);
             first_seen.entry(link.to).or_insert(link.block);
         }
 
-        // Phase 2: sort by (block, hash) for deterministic ordering.
+        // Sort by (block, hash) for deterministic insertion-order (§4.1).
         let mut ordered: Vec<([u8; 32], u64)> = first_seen.into_iter().collect();
         ordered.sort_unstable_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
 

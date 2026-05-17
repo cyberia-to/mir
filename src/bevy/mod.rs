@@ -4,7 +4,7 @@
 //! Feature-gated: compile with `--features bevy-plugin`.
 //!
 //! NOTE: WorldState::Graph must be added to the cyb/bevy WorldState enum
-//! (see /Users/master/cyberia-to/cyb/bevy/src/worlds/mod.rs — TODO).
+//! (see /Users/master/cyber/cyb/bevy/src/worlds/mod.rs — TODO).
 
 pub mod components;
 pub mod resources;

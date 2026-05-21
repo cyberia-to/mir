@@ -94,12 +94,13 @@ pub fn swap_epoch_if_ready(
     loading_q:    Query<Entity, With<LoadingOverlay>>,
     mut commands: Commands,
 ) {
+    // Only upload once: once gpu has particles, skip re-upload.
+    if gpu.n_particles > 0 { return; }
     let mut lock = match epoch_res.inner.try_write() { Ok(l) => l, Err(_) => return };
-    if let Some(epoch) = lock.take() {
-        info!("mir: epoch swapped, {} particles", epoch.positions.len() / 3);
-        gpu.upload_epoch(&epoch);
+    if let Some(epoch) = lock.as_ref() {
+        info!("mir: epoch ready, {} particles", epoch.positions.len() / 3);
+        gpu.upload_epoch(epoch);
         for e in loading_q.iter() { commands.entity(e).despawn(); }
-        *lock = Some(epoch);
     }
 }
 
@@ -241,32 +242,16 @@ pub fn dispatch_tiers(
         }
     }
 
-    // T∞ background fill (§6.5): τ-tinted gradient via TInfPass (GPU).
-    // For neural background, use NrfState from epoch; cpu_ray_march for cpu-reference path.
-    // Use cluster-0 color from the focus array as dominant tint.
-    let cluster_tint = if !gpu.focus.is_empty() && gpu.col_buf.is_some() {
-        let cb = gpu.col_buf.as_ref().unwrap();
-        cb.read_f32(|s| {
-            if s.len() >= 3 { [s[0], s[1], s[2], 1.0] } else { [0.02, 0.02, 0.06, 1.0] }
-        })
-    } else {
-        [0.02, 0.02, 0.06, 1.0]
-    };
-
-    if let Some(tinf) = &gpu.tinf {
-        let _ = tinf.fill_background(&mut composite, cluster_tint, cam.tau, [w, h]);
-    } else {
-        // CPU fallback: fill transparent pixels with a dark blue background.
-        for chunk in composite.chunks_mut(4) {
-            if chunk[3] < 0.5 {
-                let [r, g, b, _] = [0.02f32, 0.02, 0.06, 1.0];
-                chunk[0] = r; chunk[1] = g; chunk[2] = b; chunk[3] = 1.0;
-            }
+    // Background: pure black for all transparent pixels.
+    for chunk in composite.chunks_mut(4) {
+        if chunk[3] < 0.5 {
+            chunk[0] = 0.0; chunk[1] = 0.0; chunk[2] = 0.0; chunk[3] = 1.0;
         }
     }
 
     gpu.last_pixels = Some(composite);
 }
+
 
 pub fn animate_edges(mut gpu: ResMut<GpuBuffers>, time: Res<Time>) {
     let n = gpu.edge.flow_offsets().len();

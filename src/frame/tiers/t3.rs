@@ -71,7 +71,7 @@ kernel void gaussian_splat(
 
         float2 delta = pix_f - screen;
         float  dist2 = dot(delta, delta);
-        float  sigma2 = proj_r * proj_r * 0.5f;  // Gaussian σ² = (proj_r/√2)²
+        float  sigma2 = proj_r * proj_r * 0.18f;  // tighter splat for crisp dots
 
         if (dist2 > 9.0f * sigma2) continue;  // skip if > 3σ away
 
@@ -94,10 +94,9 @@ pub fn sort_by_depth(
     positions: &[f32],
     camera:    &Camera,
 ) -> Vec<u32> {
-    // Only sort T3 entries.
+    // Include all tiers: TInf sub-pixel particles still get the 0.5px minimum splat.
     let mut t3: Vec<u32> = entries
         .iter()
-        .filter(|(_, t)| *t == TierLevel::T3)
         .map(|(idx, _)| *idx)
         .collect();
 

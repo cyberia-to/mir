@@ -150,21 +150,19 @@ fn epoch_pipeline(csr: &Csr, state_out: Arc<RwLock<Option<EpochState>>>) {
     }).collect();
 
     // 3c. Compute radii (r₀ · √φ*) with role-based multiplier.
-    let r0 = 10.0f32;
+    let r0 = 100.0f32;
     let radii: Vec<f32> = (0..n).map(|i| {
         let role_mult = match roles[i] { Role::Hub => 1.5, Role::Leaf => 0.7, Role::Sphere => 1.0 };
         r0 * focus[i].sqrt() * role_mult
     }).collect();
+    // Uniform blue palette: hub = bright, sphere = mid, leaf = dark.
     let colors: Vec<f32> = (0..n).flat_map(|i| {
-        let lum = (focus[i] * n as f32 * 0.5).clamp(0.1, 1.0);
-        let sat = match roles[i] { Role::Hub => 0.9, Role::Leaf => 0.5, Role::Sphere => 0.8 };
-        let hue = if sc.extra.len() > i * 2 + 1 && (sc.extra[i*2].abs() + sc.extra[i*2+1].abs()) > 1e-8 {
-            sc.extra[i*2+1].atan2(sc.extra[i*2])
-        } else {
-            let pos = sc.position(i);
-            pos[1].atan2(pos[0])
+        let (r, g, b) = match roles[i] {
+            Role::Hub    => (0.20f32, 0.55f32, 1.00f32),
+            Role::Sphere => (0.12f32, 0.38f32, 0.88f32),
+            Role::Leaf   => (0.07f32, 0.22f32, 0.68f32),
         };
-        hsl_to_rgb(hue, sat, lum)
+        [r, g, b]
     }).collect();
 
     // 4. Build BVH.

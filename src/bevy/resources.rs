@@ -34,6 +34,11 @@ pub struct GraphCamera {
     pub tau:      f32,
     pub tau_target: f32,
     pub viewport: [f32; 2],
+    /// Orbit radius (distance from origin). Derived from position on init,
+    /// then driven by scroll; position is recomputed from (yaw,pitch,orbit_dist) each frame.
+    pub orbit_dist: f32,
+    /// Last known cursor position for delta computation (pixels).
+    pub last_cursor: Option<[f32; 2]>,
     /// Active §9.2 warp animation (None if free-fly).
     pub warp:     Option<WarpAnim>,
 }
@@ -47,6 +52,8 @@ impl Default for GraphCamera {
             near: 1.0, far: 100_000.0,
             tau: 1.0, tau_target: 1.0,
             viewport: [1280.0, 720.0],
+            orbit_dist: 3000.0,
+            last_cursor: None,
             warp: None,
         }
     }
@@ -195,11 +202,11 @@ impl GpuBuffers {
         let mut s = Self::default();
         match aruminium::Gpu::open() {
             Ok(gpu) => {
-                s.cull      = CullPass::new().ok();
-                s.t2        = T2Pass::new().ok();
-                s.t3        = T3Pass::new().ok();
-                s.tinf      = TInfPass::new().ok();
-                s.edge_line = EdgeLinePass::new().ok();
+                s.cull      = CullPass::new()    .map_err(|e| warn!("mir: CullPass init: {e}")).ok();
+                s.t2        = T2Pass::new()      .map_err(|e| warn!("mir: T2Pass init: {e}")).ok();
+                s.t3        = T3Pass::new()      .map_err(|e| warn!("mir: T3Pass init: {e}")).ok();
+                s.tinf      = TInfPass::new()    .map_err(|e| warn!("mir: TInfPass init: {e}")).ok();
+                s.edge_line = EdgeLinePass::new().map_err(|e| warn!("mir: EdgeLinePass init: {e}")).ok();
                 s.dummy_buf = gpu.buffer(4).ok();
                 s.gpu       = Some(gpu);
             }

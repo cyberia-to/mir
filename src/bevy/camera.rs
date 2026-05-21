@@ -1,27 +1,25 @@
-//! 6DOF camera control: WASD+QE movement, mouse look, scroll τ zoom.
+//! Orbit camera: drag to rotate around origin, scroll to zoom.
 //! §9.1 — §9.5 navigation.
 
 use bevy::ecs::message::MessageReader;
-use bevy::input::mouse::{MouseMotion, MouseWheel};
+use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use super::resources::{GraphCamera, WarpAnim};
 
-const SCROLL_SENS: f32 = 0.1;
-const TAU_MIN:     f32 = 0.01;
-const TAU_MAX:     f32 = 100.0;
-const MOVE_SPEED:  f32 = 500.0;
-const LOOK_SENS:   f32 = 0.003;
-const DAMPING:     f32 = 8.0;
+const TAU_MIN:   f32 = 0.01;
+const TAU_MAX:   f32 = 100.0;
+const LOOK_SENS: f32 = 0.005;
+const DAMPING:   f32 = 8.0;
 
-/// §9.5: τ₀ = 0.1, α = 2, R_scene = 1000.
 const TAU0:    f32 = 0.1;
 const ALPHA:   f32 = 2.0;
 const R_SCENE: f32 = 1000.0;
 
 pub fn update_camera(
     mut cam:    ResMut<GraphCamera>,
+    buttons:    Res<ButtonInput<MouseButton>>,
     keys:       Res<ButtonInput<KeyCode>>,
-    mut motion: MessageReader<MouseMotion>,
+    mut cursor: MessageReader<CursorMoved>,
     mut scroll: MessageReader<MouseWheel>,
     time:       Res<Time>,
     windows:    Query<&Window>,
@@ -32,7 +30,7 @@ pub fn update_camera(
         cam.viewport = [win.width(), win.height()];
     }
 
-    // Advance warp animation (§9.2). Extract all warp data first to avoid borrow conflict.
+    // Advance warp animation (§9.2).
     if cam.warp.is_some() {
         let (from_pos, to_pos, to_yaw, to_pitch, elapsed, duration) = {
             let w = cam.warp.as_mut().unwrap();
@@ -41,96 +39,94 @@ pub fn update_camera(
         };
         let t = smooth_step(elapsed / duration);
         for i in 0..3 { cam.position[i] = lerp(from_pos[i], to_pos[i], t); }
-        let cur_yaw   = cam.yaw;
-        let cur_pitch = cam.pitch;
+        let cur_yaw = cam.yaw; let cur_pitch = cam.pitch;
         cam.yaw   = lerp_angle(cur_yaw,   to_yaw,   t);
         cam.pitch = lerp(cur_pitch, to_pitch, t);
         if elapsed >= duration { cam.warp = None; }
+        // Sync orbit_dist to the warp destination.
+        let p = cam.position;
+        cam.orbit_dist = (p[0]*p[0] + p[1]*p[1] + p[2]*p[2]).sqrt().max(10.0);
         update_tau_from_position(&mut cam);
         return;
     }
 
+    // Scroll → smooth zoom. Clamp ev.y so a fast trackpad swipe doesn't jump.
     for ev in scroll.read() {
-        let factor = 1.0 - ev.y * SCROLL_SENS;
-        cam.tau_target = (cam.tau_target * factor).clamp(TAU_MIN, TAU_MAX);
+        let step = ev.y.clamp(-2.0, 2.0) * 0.06;
+        cam.orbit_dist = (cam.orbit_dist * (-step).exp()).clamp(50.0, 30000.0);
     }
+
+    // Drag (any button) → orbit: rotate yaw/pitch around the origin.
+    let dragging = buttons.pressed(MouseButton::Left)
+        || buttons.pressed(MouseButton::Right)
+        || buttons.pressed(MouseButton::Middle);
+
+    for ev in cursor.read() {
+        let cur = [ev.position.x, ev.position.y];
+        if let Some(last) = cam.last_cursor {
+            if dragging {
+                let dx = cur[0] - last[0];
+                let dy = cur[1] - last[1];
+                cam.yaw   -= dx * LOOK_SENS;
+                cam.pitch  = (cam.pitch + dy * LOOK_SENS)
+                    .clamp(-std::f32::consts::FRAC_PI_2 + 0.01,
+                            std::f32::consts::FRAC_PI_2 - 0.01);
+            }
+        }
+        cam.last_cursor = Some(cur);
+    }
+    if !dragging { cam.last_cursor = None; }
+
+    // WASD + arrow keys: orbit rotate and zoom.
+    let rot  = 1.5 * dt;
+    let zoom = 1.0 + 2.0 * dt;
+    if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft)  { cam.yaw   -= rot; }
+    if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) { cam.yaw   += rot; }
+    if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp)    { cam.pitch  = (cam.pitch - rot).clamp(-std::f32::consts::FRAC_PI_2 + 0.01, std::f32::consts::FRAC_PI_2 - 0.01); }
+    if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown)  { cam.pitch  = (cam.pitch + rot).clamp(-std::f32::consts::FRAC_PI_2 + 0.01, std::f32::consts::FRAC_PI_2 - 0.01); }
+    if keys.pressed(KeyCode::KeyQ) || keys.pressed(KeyCode::Minus)      { cam.orbit_dist = (cam.orbit_dist * zoom).clamp(50.0, 30000.0); }
+    if keys.pressed(KeyCode::KeyE) || keys.pressed(KeyCode::Equal)      { cam.orbit_dist = (cam.orbit_dist / zoom).clamp(50.0, 30000.0); }
+
+    // Recompute position from spherical orbit coordinates (orbit around origin).
+    // forward() = [cp*sy, sp, -cp*cy]
+    // position  = -dist * forward = [-dist*cp*sy, -dist*sp, dist*cp*cy]
+    let (sy, cy) = cam.yaw.sin_cos();
+    let (sp, cp) = cam.pitch.sin_cos();
+    let d = cam.orbit_dist;
+    cam.position = [-d * cp * sy, -d * sp, d * cp * cy];
+
     let gap = cam.tau_target - cam.tau;
     cam.tau += gap * (DAMPING * dt).min(1.0);
-
-    for ev in motion.read() {
-        cam.yaw   -= ev.delta.x * LOOK_SENS;
-        cam.pitch  = (cam.pitch - ev.delta.y * LOOK_SENS)
-            .clamp(-std::f32::consts::FRAC_PI_2 + 0.01,
-                    std::f32::consts::FRAC_PI_2 - 0.01);
-    }
-
-    let fwd   = cam.forward();
-    let right = cam.right();
-    let up    = [0.0f32, 1.0, 0.0];
-    let speed = MOVE_SPEED * dt;
-    let mut mv = [0.0f32; 3];
-
-    if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
-        for i in 0..3 { mv[i] += fwd[i] * speed; }
-    }
-    if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
-        for i in 0..3 { mv[i] -= fwd[i] * speed; }
-    }
-    if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
-        for i in 0..3 { mv[i] -= right[i] * speed; }
-    }
-    if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
-        for i in 0..3 { mv[i] += right[i] * speed; }
-    }
-    if keys.pressed(KeyCode::KeyE) { for i in 0..3 { mv[i] += up[i] * speed; } }
-    if keys.pressed(KeyCode::KeyQ) { for i in 0..3 { mv[i] -= up[i] * speed; } }
-
-    for i in 0..3 { cam.position[i] += mv[i]; }
-
     update_tau_from_position(&mut cam);
 }
 
-/// §9.4 Follow-flow: bias camera velocity toward the highest-weight outgoing
-/// neighbor of the nearest particle.  Call this from any system that holds
-/// `ResMut<GraphCamera>` and has access to positions + CSR.
-///
-/// `modifier_held` — true when the user is holding the follow-flow modifier.
-/// `positions`     — flat n×3 f32 particle positions (post-epoch, R_scene scale).
-/// `csr`           — adjacency matrix for edge traversal.
+/// §9.4 Follow-flow.
 pub fn apply_follow_flow(
-    cam:          &mut GraphCamera,
+    cam:           &mut GraphCamera,
     modifier_held: bool,
-    positions:    &[f32],
-    csr:          &crate::graph::Csr,
-    dt:           f32,
+    positions:     &[f32],
+    csr:           &crate::graph::Csr,
+    _dt:           f32,
 ) {
     if !modifier_held || positions.is_empty() || csr.n == 0 { return; }
-
     let n = positions.len() / 3;
     let cam_p = cam.position;
-
-    // Find nearest particle.
     let nearest = (0..n).min_by(|&a, &b| {
         let da = dist2(cam_p, pos_of(positions, a));
         let db = dist2(cam_p, pos_of(positions, b));
         da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
     });
     let Some(near_idx) = nearest else { return };
-
-    // Find highest-weight outgoing neighbor.
     let (cols, vals) = csr.row(near_idx);
-    let best_nbr = cols.iter().zip(vals.iter())
+    let best = cols.iter().zip(vals.iter())
         .max_by(|(_, &wa), (_, &wb)| wa.partial_cmp(&wb).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(&c, _)| c as usize);
-    let Some(target_idx) = best_nbr else { return };
-
-    // Bias camera velocity toward target particle.
+    let Some(target_idx) = best else { return };
     let target = pos_of(positions, target_idx);
-    let flow_speed = MOVE_SPEED * dt;
-    for i in 0..3 {
-        let dir = target[i] - cam_p[i];
-        cam.position[i] += dir.signum() * flow_speed.min(dir.abs() * 0.1);
-    }
+    // Bias orbit toward target by nudging yaw/pitch.
+    let dx = target[0] - cam_p[0];
+    let dz = target[2] - cam_p[2];
+    cam.yaw += dz.atan2(dx) * 0.001;
 }
 
 fn dist2(a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -142,12 +138,10 @@ fn pos_of(positions: &[f32], i: usize) -> [f32; 3] {
     [positions[b], positions[b+1], positions[b+2]]
 }
 
-/// §9.5: τ(p) = τ₀ · (1 + ‖p‖ / R_scene)^α (centroid ≈ origin after Procrustes).
 fn update_tau_from_position(cam: &mut GraphCamera) {
     let p = cam.position;
     let dist = (p[0]*p[0] + p[1]*p[1] + p[2]*p[2]).sqrt();
     let tau_geo = TAU0 * (1.0 + dist / R_SCENE).powf(ALPHA);
-    // Scroll-based tau_target takes precedence but cannot go below the geometric floor.
     cam.tau_target = cam.tau_target.max(tau_geo).clamp(TAU_MIN, TAU_MAX);
 }
 
@@ -160,10 +154,6 @@ fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {
     a + d * t
 }
 
-/// §9.2 warp: initiate a 500 ms smooth-step camera fly toward `target_pos`,
-/// oriented to look at `look_at`.
-///
-/// Call from any Bevy system that has `ResMut<GraphCamera>`.
 pub fn initiate_warp(cam: &mut GraphCamera, target_pos: [f32; 3], look_at: [f32; 3]) {
     let dx = look_at[0] - target_pos[0];
     let dy = look_at[1] - target_pos[1];
@@ -172,20 +162,14 @@ pub fn initiate_warp(cam: &mut GraphCamera, target_pos: [f32; 3], look_at: [f32;
     let to_yaw  = dz.atan2(dx) - std::f32::consts::FRAC_PI_2;
     let to_pitch = -(dy.atan2(horiz))
         .clamp(-std::f32::consts::FRAC_PI_2 + 0.01, std::f32::consts::FRAC_PI_2 - 0.01);
-
     cam.warp = Some(WarpAnim {
-        from_pos:  cam.position,
-        to_pos:    target_pos,
-        to_yaw,
-        to_pitch,
-        elapsed:   0.0,
-        duration:  0.5,
+        from_pos: cam.position,
+        to_pos:   target_pos,
+        to_yaw, to_pitch,
+        elapsed:  0.0,
+        duration: 0.5,
     });
 }
-
-// ---------------------------------------------------------------------------
-// Unit tests (pure Rust, no Bevy app)
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -196,12 +180,10 @@ mod tests {
     fn tau_at_origin_equals_tau0() {
         let mut cam = GraphCamera::default();
         cam.position = [0.0, 0.0, 0.0];
-        cam.tau_target = TAU_MIN; // force to minimum
+        cam.tau_target = TAU_MIN;
         update_tau_from_position(&mut cam);
-        // At origin: dist=0, tau_geo = TAU0*(1+0)^2 = 0.1
         let expected = TAU0.clamp(TAU_MIN, TAU_MAX);
-        assert!((cam.tau_target - expected).abs() < 1e-5,
-            "tau_target={} expected={}", cam.tau_target, expected);
+        assert!((cam.tau_target - expected).abs() < 1e-5);
     }
 
     #[test]
@@ -212,43 +194,33 @@ mod tests {
         update_tau_from_position(&mut cam_near);
 
         let mut cam_far = GraphCamera::default();
-        cam_far.position = [0.0, 0.0, 1000.0]; // R_scene away
+        cam_far.position = [0.0, 0.0, 1000.0];
         cam_far.tau_target = TAU_MIN;
         update_tau_from_position(&mut cam_far);
 
-        // τ at R_scene = τ₀ · (1+1)² = 0.4, greater than τ₀ = 0.1
-        assert!(cam_far.tau_target > cam_near.tau_target,
-            "tau should increase with distance: near={} far={}",
-            cam_near.tau_target, cam_far.tau_target);
-        assert!((cam_far.tau_target - 0.4).abs() < 0.01,
-            "tau at R_scene={}", cam_far.tau_target);
+        assert!(cam_far.tau_target > cam_near.tau_target);
+        assert!((cam_far.tau_target - 0.4).abs() < 0.01);
     }
 
     #[test]
     fn warp_starts_and_completes() {
         let mut cam = GraphCamera::default();
         cam.position = [0.0, 0.0, 3000.0];
-
         initiate_warp(&mut cam, [0.0, 0.0, 30.0], [0.0, 0.0, 0.0]);
-        assert!(cam.warp.is_some(), "warp should be active");
-
-        // Simulate many frames until warp completes.
+        assert!(cam.warp.is_some());
         for _ in 0..100 {
             if cam.warp.is_none() { break; }
-            let (from_pos, to_pos, to_yaw, to_pitch, elapsed, duration) = {
+            let (from_pos, to_pos, _, _, elapsed, duration) = {
                 let w = cam.warp.as_mut().unwrap();
                 w.elapsed = (w.elapsed + 0.02).min(w.duration);
                 (w.from_pos, w.to_pos, w.to_yaw, w.to_pitch, w.elapsed, w.duration)
             };
             let t = smooth_step(elapsed / duration);
             for i in 0..3 { cam.position[i] = lerp(from_pos[i], to_pos[i], t); }
-            let _ = (to_yaw, to_pitch);
             if elapsed >= duration { cam.warp = None; }
         }
-
-        assert!(cam.warp.is_none(), "warp should have completed");
-        assert!((cam.position[2] - 30.0).abs() < 1.0,
-            "camera should be near target: z={}", cam.position[2]);
+        assert!(cam.warp.is_none());
+        assert!((cam.position[2] - 30.0).abs() < 1.0);
     }
 
     #[test]

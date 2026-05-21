@@ -232,10 +232,10 @@ kernel void edge_line_rasterize(
     float line_w = clamp(w * 3.0f, 0.5f, 4.0f);  // pixel width from edge weight
     float half_w = line_w * 0.5f;
 
-    // Edge color: flow-tinted cyan (cold) to orange (hot) by uv offset.
+    // Edge color: neon green with slight flow shimmer.
     float uv  = flow_uvs[gid];
-    float3 edge_col = mix(float3(0.1f, 0.5f, 0.8f),
-                          float3(0.9f, 0.5f, 0.1f), uv);
+    float3 edge_col = mix(float3(0.05f, 0.60f, 0.10f),
+                          float3(0.30f, 1.00f, 0.30f), uv);
 
     for (int i = 0; i <= steps; ++i) {
         float2 px = s0 + step * float(i);

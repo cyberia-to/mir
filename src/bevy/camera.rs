@@ -61,7 +61,9 @@ pub fn update_camera(
         || buttons.pressed(MouseButton::Right)
         || buttons.pressed(MouseButton::Middle);
 
+    let mut had_cursor_event = false;
     for ev in cursor.read() {
+        had_cursor_event = true;
         let cur = [ev.position.x, ev.position.y];
         if let Some(last) = cam.last_cursor {
             if dragging {
@@ -75,7 +77,13 @@ pub fn update_camera(
         }
         cam.last_cursor = Some(cur);
     }
-    if !dragging { cam.last_cursor = None; }
+    // Clear last_cursor when not dragging OR when no cursor events arrived this frame.
+    // The second case handles mouseUp events consumed by the WebView overlay: if the
+    // cursor enters a pointer-events region and the button release is swallowed, Bevy
+    // sees no cursor events. Clearing here prevents a large delta jump when events resume.
+    if !dragging || !had_cursor_event {
+        cam.last_cursor = None;
+    }
 
     // WASD + arrow keys: orbit rotate and zoom.
     let rot  = 1.5 * dt;

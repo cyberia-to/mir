@@ -174,7 +174,7 @@ unsafe impl Sync for T2Pass {}
 impl T2Pass {
     pub fn new() -> Result<Self, crate::gpu::GpuError> {
         let gpu      = crate::gpu::Gpu::open()?;
-        let lib      = gpu.compile(IMPOSTOR_MSL)?;
+        let lib      = gpu.compile(IMPOSTOR_SRC)?;
         let func     = lib.function("sphere_impostor")?;
         let pipeline = gpu.pipeline(&func)?;
         let queue    = gpu.new_command_queue()?;
@@ -287,3 +287,98 @@ fn bytemuck_cast_f32(v: &[f32]) -> &[u8] {
         std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4)
     }
 }
+
+/// Platform kernel source: MSL under Metal, WGSL under wgpu.
+#[cfg(target_vendor = "apple")]
+pub const IMPOSTOR_SRC: &str = IMPOSTOR_MSL;
+#[cfg(not(target_vendor = "apple"))]
+pub const IMPOSTOR_SRC: &str = IMPOSTOR_WGSL;
+
+#[allow(dead_code)]
+pub const IMPOSTOR_WGSL: &str = r#"
+struct Camera {
+    view_proj: mat4x4<f32>,
+    planes: array<vec4<f32>, 6>,
+    viewport: vec2<f32>,
+    near: f32,
+    far: f32,
+};
+
+@group(0) @binding(0) var<storage, read> positions: array<f32>;
+@group(0) @binding(1) var<storage, read> radii: array<f32>;
+@group(0) @binding(2) var<storage, read> colors: array<f32>;
+@group(0) @binding(3) var<uniform> cam: Camera;
+@group(0) @binding(4) var<uniform> n_spheres: u32;
+@group(0) @binding(5) var<uniform> viewport: vec2<u32>;
+@group(0) @binding(6) var<storage, read_write> out_pixels: array<vec4<f32>>;
+
+fn intersect_sphere(O: vec3<f32>, D: vec3<f32>, C: vec3<f32>, r: f32) -> f32 {
+    let oc = O - C;
+    let a = dot(D, D);
+    let hb = dot(D, oc);
+    let cc = dot(oc, oc) - r * r;
+    let disc = hb * hb - a * cc;
+    if (disc < 0.0) { return -1.0; }
+    let sq = sqrt(disc);
+    let t0 = (-hb - sq) / a;
+    if (t0 > 0.0) { return t0; }
+    let t1 = (-hb + sq) / a;
+    return select(-1.0, t1, t1 > 0.0);
+}
+
+@compute @workgroup_size(16, 16)
+fn sphere_impostor(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let W = viewport.x;
+    let H = viewport.y;
+    if (gid.x >= W || gid.y >= H) { return; }
+
+    var ndc: vec2<f32>;
+    ndc.x = (f32(gid.x) + 0.5) / f32(W) * 2.0 - 1.0;
+    ndc.y = -(f32(gid.y) + 0.5) / f32(H) * 2.0 + 1.0;
+
+    // Phase-1 approximation, same as the MSL: view_proj column 3 negated.
+    let cam_origin = vec3<f32>(-cam.view_proj[3][0], -cam.view_proj[3][1], -cam.view_proj[3][2]);
+
+    let fx = cam.view_proj[0][0];
+    let fy = cam.view_proj[1][1];
+    let ray_view = normalize(vec3<f32>(ndc.x / fx, ndc.y / fy, -1.0));
+
+    let right = vec3<f32>(cam.view_proj[0][0], cam.view_proj[0][1], cam.view_proj[0][2]);
+    let up = vec3<f32>(cam.view_proj[1][0], cam.view_proj[1][1], cam.view_proj[1][2]);
+    let forward = vec3<f32>(cam.view_proj[2][0], cam.view_proj[2][1], cam.view_proj[2][2]);
+
+    let ray_world = normalize(ray_view.x * right + ray_view.y * up + ray_view.z * forward);
+
+    var t_min = 1e9;
+    var hit_n = vec3<f32>(0.0, 0.0, 1.0);
+    var hit_col = vec3<f32>(0.0);
+    var hit_any = false;
+
+    for (var i = 0u; i < n_spheres; i++) {
+        let center = vec3<f32>(positions[i * 3u], positions[i * 3u + 1u], positions[i * 3u + 2u]);
+        let r = radii[i];
+        let col = vec3<f32>(colors[i * 3u], colors[i * 3u + 1u], colors[i * 3u + 2u]);
+
+        let t = intersect_sphere(cam_origin, ray_world, center, r);
+        if (t > 0.0 && t < t_min) {
+            t_min = t;
+            hit_any = true;
+            let hit_pos = cam_origin + t * ray_world;
+            hit_n = normalize(hit_pos - center);
+            hit_col = col;
+        }
+    }
+
+    var result = vec4<f32>(0.0);
+    if (hit_any) {
+        let light = normalize(vec3<f32>(0.5, 1.0, 0.8));
+        let diff = max(0.0, dot(hit_n, light));
+        var rim = 1.0 - max(0.0, dot(hit_n, -ray_world));
+        rim = pow(rim, 3.0) * 0.4;
+        let shade = hit_col * (0.2 + 0.8 * diff) + vec3<f32>(rim);
+        result = vec4<f32>(shade, 1.0);
+    }
+
+    out_pixels[gid.y * W + gid.x] = result;
+}
+"#;

@@ -70,7 +70,7 @@ unsafe impl Sync for TInfPass {}
 impl TInfPass {
     pub fn new() -> Result<Self, crate::gpu::GpuError> {
         let gpu      = crate::gpu::Gpu::open()?;
-        let lib      = gpu.compile(TINF_BG_MSL)?;
+        let lib      = gpu.compile(TINF_BG_SRC)?;
         let func     = lib.function("tinf_background")?;
         let pipeline = gpu.pipeline(&func)?;
         let queue    = gpu.new_command_queue()?;
@@ -146,3 +146,42 @@ mod tests {
         assert!(TINF_BG_MSL.contains("tinf_background"));
     }
 }
+
+/// Platform kernel source: MSL under Metal, WGSL under wgpu.
+#[cfg(target_vendor = "apple")]
+pub const TINF_BG_SRC: &str = TINF_BG_MSL;
+#[cfg(not(target_vendor = "apple"))]
+pub const TINF_BG_SRC: &str = TINF_BG_WGSL;
+
+#[allow(dead_code)]
+pub const TINF_BG_WGSL: &str = r#"
+@group(0) @binding(0) var<storage, read_write> pixels: array<vec4<f32>>;
+@group(0) @binding(1) var<uniform> cluster_color: vec4<f32>;
+@group(0) @binding(2) var<uniform> tau: f32;
+@group(0) @binding(3) var<uniform> viewport: vec2<u32>;
+
+@compute @workgroup_size(16, 16)
+fn tinf_background(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let W = viewport.x;
+    let H = viewport.y;
+    if (gid.x >= W || gid.y >= H) { return; }
+
+    let idx = gid.y * W + gid.x;
+    let px = pixels[idx];
+
+    if (px.w >= 0.5) { return; }
+
+    var uv: vec2<f32>;
+    uv.x = (f32(gid.x) + 0.5) / f32(W) * 2.0 - 1.0;
+    uv.y = (f32(gid.y) + 0.5) / f32(H) * 2.0 - 1.0;
+    let r = min(length(uv), 1.0);
+
+    let fog_t = clamp(log(tau + 1.0) / log(101.0), 0.0, 1.0);
+
+    let centre_col = cluster_color.rgb * (0.08 + 0.12 * fog_t);
+    let bg = centre_col * (1.0 - r * r);
+
+    let src_a = 1.0 - px.w;
+    pixels[idx] = vec4<f32>(bg * src_a + px.rgb * px.w, 1.0);
+}
+"#;

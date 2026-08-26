@@ -216,11 +216,15 @@ impl GpuBuffers {
     }
 
     pub fn upload_epoch(&mut self, epoch: &EpochState) {
-        let Some(gpu) = &self.gpu else { return };
-        let n = epoch.positions.len() / 3;
-        self.n_particles = n;
+        // CPU-side state lands regardless of a device: it feeds diffusion and
+        // marks the epoch consumed. Returning before this on a device-less
+        // platform left n_particles at 0, so swap_epoch_if_ready re-ran the
+        // upload (and its info! line) every frame.
+        self.n_particles = epoch.positions.len() / 3;
         self.focus  = epoch.focus.clone();
         self.d_inv  = epoch.d_inv.clone();
+
+        let Some(gpu) = &self.gpu else { return };
         self.pos_buf = gpu.buffer_with_data(cast_f32(&epoch.positions)).ok();
         self.rad_buf = gpu.buffer_with_data(cast_f32(&epoch.radii)).ok();
         self.col_buf = gpu.buffer_with_data(cast_f32(&epoch.colors)).ok();

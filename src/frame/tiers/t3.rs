@@ -149,7 +149,7 @@ unsafe impl Sync for T3Pass {}
 impl T3Pass {
     pub fn new() -> Result<Self, crate::gpu::GpuError> {
         let gpu      = crate::gpu::Gpu::open()?;
-        let lib      = gpu.compile(SPLAT_MSL)?;
+        let lib      = gpu.compile(SPLAT_SRC)?;
         let func     = lib.function("gaussian_splat")?;
         let pipeline = gpu.pipeline(&func)?;
         let queue    = gpu.new_command_queue()?;
@@ -255,3 +255,79 @@ impl T3Pass {
 fn cast_f32(v: &[f32]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4) }
 }
+
+/// Platform kernel source: MSL under Metal, WGSL under wgpu.
+#[cfg(target_vendor = "apple")]
+pub const SPLAT_SRC: &str = SPLAT_MSL;
+#[cfg(not(target_vendor = "apple"))]
+pub const SPLAT_SRC: &str = SPLAT_WGSL;
+
+#[allow(dead_code)]
+pub const SPLAT_WGSL: &str = r#"
+struct Camera {
+    view_proj: mat4x4<f32>,
+    planes: array<vec4<f32>, 6>,
+    viewport: vec2<f32>,
+    near: f32,
+    far: f32,
+};
+
+@group(0) @binding(0) var<storage, read> sorted_positions: array<f32>;
+@group(0) @binding(1) var<storage, read> sorted_radii: array<f32>;
+@group(0) @binding(2) var<storage, read> sorted_colors: array<f32>;
+@group(0) @binding(3) var<storage, read> sorted_opacity: array<f32>;
+@group(0) @binding(4) var<uniform> camera: Camera;
+@group(0) @binding(5) var<uniform> n_splats: u32;
+@group(0) @binding(6) var<uniform> viewport: vec2<u32>;
+@group(0) @binding(7) var<storage, read_write> out_pixels: array<vec4<f32>>;
+
+@compute @workgroup_size(16, 16)
+fn gaussian_splat(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let W = viewport.x;
+    let H = viewport.y;
+    if (gid.x >= W || gid.y >= H) { return; }
+
+    var color_acc = vec3<f32>(0.0);
+    var alpha_acc = 0.0;
+
+    let pix_f = vec2<f32>(f32(gid.x) + 0.5, f32(gid.y) + 0.5);
+
+    for (var i = 0u; i < n_splats; i++) {
+        if (alpha_acc >= 0.9999) { break; }
+
+        let center = vec3<f32>(sorted_positions[i * 3u],
+                               sorted_positions[i * 3u + 1u],
+                               sorted_positions[i * 3u + 2u]);
+        let r = sorted_radii[i];
+        let col = vec3<f32>(sorted_colors[i * 3u],
+                            sorted_colors[i * 3u + 1u],
+                            sorted_colors[i * 3u + 2u]);
+        let opacity = sorted_opacity[i];
+
+        let clip = camera.view_proj * vec4<f32>(center, 1.0);
+        if (clip.w <= 0.0) { continue; }
+
+        let ndc = clip.xy / clip.w;
+        var screen: vec2<f32>;
+        screen.x = (ndc.x * 0.5 + 0.5) * f32(W);
+        screen.y = (1.0 - (ndc.y * 0.5 + 0.5)) * f32(H);
+
+        var proj_r = r * abs(camera.view_proj[1][1]) / clip.w * f32(H) * 0.5;
+        proj_r = max(proj_r, 0.5);
+
+        let delta = pix_f - screen;
+        let dist2 = dot(delta, delta);
+        let sigma2 = proj_r * proj_r * 0.18;
+
+        if (dist2 > 9.0 * sigma2) { continue; }
+
+        let g = exp(-0.5 * dist2 / sigma2);
+        let alpha = opacity * g;
+
+        color_acc += col * alpha * (1.0 - alpha_acc);
+        alpha_acc += alpha * (1.0 - alpha_acc);
+    }
+
+    out_pixels[gid.y * W + gid.x] = vec4<f32>(color_acc, alpha_acc);
+}
+"#;

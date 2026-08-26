@@ -274,7 +274,7 @@ unsafe impl Sync for EdgeLinePass {}
 impl EdgeLinePass {
     pub fn new() -> Result<Self, crate::gpu::GpuError> {
         let gpu  = crate::gpu::Gpu::open()?;
-        let lib  = gpu.compile(EDGE_LINE_MSL)?;
+        let lib  = gpu.compile(EDGE_LINE_SRC)?;
         let func = lib.function("edge_line_rasterize")?;
         let pipeline = gpu.pipeline(&func)?;
         let queue = gpu.new_command_queue()?;
@@ -456,3 +456,87 @@ mod tests {
         assert_eq!(bundled.len(), 2, "distinct cluster pairs should not bundle");
     }
 }
+
+/// Platform kernel source: MSL under Metal, WGSL under wgpu.
+///
+/// The WGSL side reads positions as a flat `array<f32>` — `array<vec3<f32>>`
+/// in a storage buffer strides at 16 bytes while the host packs xyz at 12.
+#[cfg(target_vendor = "apple")]
+pub const EDGE_LINE_SRC: &str = EDGE_LINE_MSL;
+#[cfg(not(target_vendor = "apple"))]
+pub const EDGE_LINE_SRC: &str = EDGE_LINE_WGSL;
+
+#[allow(dead_code)]
+pub const EDGE_LINE_WGSL: &str = r#"
+@group(0) @binding(0) var<storage, read> positions: array<f32>;
+@group(0) @binding(1) var<storage, read> edges: array<vec2<u32>>;
+@group(0) @binding(2) var<storage, read> weights: array<f32>;
+@group(0) @binding(3) var<storage, read> flow_uvs: array<f32>;
+@group(0) @binding(4) var<storage, read_write> out_pixels: array<vec4<f32>>;
+@group(0) @binding(5) var<uniform> view_proj: mat4x4<f32>;
+@group(0) @binding(6) var<uniform> viewport: vec2<u32>;
+
+fn project(p: vec3<f32>, W: f32, H: f32) -> vec2<f32> {
+    let clip = view_proj * vec4<f32>(p, 1.0);
+    if (clip.w <= 0.0) { return vec2<f32>(-1e9, -1e9); }
+    let ndc = clip.xy / clip.w;
+    return vec2<f32>((ndc.x * 0.5 + 0.5) * W, (1.0 - (ndc.y * 0.5 + 0.5)) * H);
+}
+
+fn fetch(idx: u32) -> vec3<f32> {
+    return vec3<f32>(positions[idx * 3u], positions[idx * 3u + 1u], positions[idx * 3u + 2u]);
+}
+
+@compute @workgroup_size(64)
+fn edge_line_rasterize(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    let gid = gid3.x;
+    if (gid >= arrayLength(&edges)) { return; }
+
+    let W = viewport.x;
+    let H = viewport.y;
+
+    let e = edges[gid];
+    let w = weights[gid];
+    let p0 = fetch(e.x);
+    let p1 = fetch(e.y);
+
+    let s0 = project(p0, f32(W), f32(H));
+    let s1 = project(p1, f32(W), f32(H));
+
+    if (s0.x < 0.0 || s0.x >= f32(W) || s0.y < 0.0 || s0.y >= f32(H)) { return; }
+    if (s1.x < 0.0 || s1.x >= f32(W) || s1.y < 0.0 || s1.y >= f32(H)) { return; }
+
+    let delta = s1 - s0;
+    let steps = i32(max(abs(delta.x), abs(delta.y))) + 1;
+    let step = delta / f32(steps);
+
+    let line_w = clamp(w * 3.0, 0.5, 4.0);
+    let half_w = line_w * 0.5;
+
+    let uv = flow_uvs[gid];
+    let edge_col = mix(vec3<f32>(0.05, 0.60, 0.10), vec3<f32>(0.30, 1.00, 0.30), uv);
+
+    for (var i = 0; i <= steps; i++) {
+        let px = s0 + step * f32(i);
+        let ix = i32(px.x);
+        let iy = i32(px.y);
+
+        for (var dy = -1; dy <= 1; dy++) {
+            for (var dx = -1; dx <= 1; dx++) {
+                let nx = ix + dx;
+                let ny = iy + dy;
+                if (nx < 0 || nx >= i32(W) || ny < 0 || ny >= i32(H)) { continue; }
+                let off = vec2<f32>(f32(nx), f32(ny)) - px;
+                let dist = length(off);
+                if (dist > half_w + 0.5) { continue; }
+
+                let alpha = clamp(1.0 - (dist - half_w), 0.0, 1.0) * 0.6;
+                let idx = u32(ny) * W + u32(nx);
+                let old = out_pixels[idx];
+                out_pixels[idx] = vec4<f32>(old.rgb + edge_col * alpha * (1.0 - old.a),
+                                            min(old.a + alpha, 1.0));
+            }
+        }
+    }
+}
+"#;

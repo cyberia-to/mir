@@ -23,5 +23,11 @@ aruminium = { path = "../honeycrisp/aruminium" }
 acpu      = { path = "../honeycrisp/acpu" }
 unimem    = { path = "../honeycrisp/unimem" }
 
+# The portable device layer (Vulkan / DX12 / GL). Same wgpu major as Bevy,
+# so cyb's binary carries one copy.
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+wgpu     = "27"
+pollster = "0.4"
+
 [dev-dependencies]
 tempfile = "3"

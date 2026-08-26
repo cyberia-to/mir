@@ -51,7 +51,7 @@ unsafe impl Sync for CullPass {}
 impl CullPass {
     pub fn new() -> Result<Self, crate::gpu::GpuError> {
         let gpu   = crate::gpu::Gpu::open()?;
-        let lib   = gpu.compile(BVH_CULL_MSL)?;
+        let lib   = gpu.compile(BVH_CULL_SRC)?;
         let func  = lib.function("bvh_cull")?;
         let pipeline = gpu.pipeline(&func)?;
         let queue = gpu.new_command_queue()?;
@@ -236,5 +236,101 @@ kernel void bvh_cull(
 
     uint slot = atomic_fetch_add_explicit(visible_count, 1u, memory_order_relaxed);
     visible_out[slot] = uint2(gid, tier);
+}
+"#;
+
+/// The kernel for the platform's device layer: MSL under Metal, WGSL under
+/// wgpu. Same math, same buffer indices; WebGPU dispatches whole workgroups,
+/// so the WGSL side leans on the same `gid >= n` guard Metal already had.
+#[cfg(target_vendor = "apple")]
+pub const BVH_CULL_SRC: &str = BVH_CULL_MSL;
+#[cfg(not(target_vendor = "apple"))]
+pub const BVH_CULL_SRC: &str = BVH_CULL_WGSL;
+
+#[allow(dead_code)]
+pub const BVH_CULL_WGSL: &str = r#"
+struct Camera {
+    view_proj: mat4x4<f32>,
+    planes: array<vec4<f32>, 6>,
+    viewport: vec2<f32>,
+    near: f32,
+    far: f32,
+};
+
+struct BvhNode {
+    aabb_min: vec3<f32>,
+    focus_sum: f32,
+    aabb_max: vec3<f32>,
+    child_start: u32,
+    child_count: u32,
+    is_leaf: u32,
+    leaf_start: u32,
+    leaf_count: u32,
+};
+
+@group(0) @binding(0) var<storage, read> positions: array<f32>;
+@group(0) @binding(1) var<storage, read> radii: array<f32>;
+@group(0) @binding(2) var<storage, read> bvh: array<BvhNode>;
+@group(0) @binding(3) var<uniform> cam: Camera;
+@group(0) @binding(4) var<storage, read_write> visible_count: atomic<u32>;
+@group(0) @binding(5) var<storage, read_write> visible_out: array<vec2<u32>>;
+@group(0) @binding(6) var<uniform> n_particles: u32;
+
+const S_T0: f32 = 200.0;
+const S_T1: f32 = 40.0;
+const S_T2: f32 = 8.0;
+const S_T3: f32 = 1.0;
+
+fn aabb_outside_plane(aabb_min: vec3<f32>, aabb_max: vec3<f32>, plane: vec4<f32>) -> bool {
+    var p: vec3<f32>;
+    p.x = select(aabb_min.x, aabb_max.x, plane.x >= 0.0);
+    p.y = select(aabb_min.y, aabb_max.y, plane.y >= 0.0);
+    p.z = select(aabb_min.z, aabb_max.z, plane.z >= 0.0);
+    return dot(plane.xyz, p) + plane.w < 0.0;
+}
+
+fn aabb_culled(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
+    for (var i = 0; i < 6; i++) {
+        if (aabb_outside_plane(aabb_min, aabb_max, cam.planes[i])) { return true; }
+    }
+    return false;
+}
+
+fn screen_diameter(center: vec3<f32>, radius: f32) -> f32 {
+    let clip = cam.view_proj * vec4<f32>(center, 1.0);
+    if (clip.w <= 0.0) { return 0.0; }
+    let proj_r = radius * abs(cam.view_proj[1][1]) / clip.w;
+    return proj_r * cam.viewport.y;
+}
+
+fn diameter_to_tier(diam: f32) -> u32 {
+    if (diam >= S_T0) { return 0u; }
+    if (diam >= S_T1) { return 1u; }
+    if (diam >= S_T2) { return 2u; }
+    if (diam >= S_T3) { return 3u; }
+    return 4u;
+}
+
+@compute @workgroup_size(64)
+fn bvh_cull(@builtin(global_invocation_id) gid3: vec3<u32>) {
+    // Keeps the BVH binding live for the auto layout; the per-particle
+    // point-cull below does not walk it (same as the Metal kernel).
+    _ = arrayLength(&bvh);
+
+    let gid = gid3.x;
+    if (gid >= n_particles) { return; }
+
+    let pos = vec3<f32>(positions[gid * 3u], positions[gid * 3u + 1u], positions[gid * 3u + 2u]);
+    let radius = radii[gid];
+
+    let pmin = pos - vec3<f32>(radius);
+    let pmax = pos + vec3<f32>(radius);
+    if (aabb_culled(pmin, pmax)) { return; }
+
+    let diam = screen_diameter(pos, radius);
+    let tier = diameter_to_tier(diam);
+
+    let slot = atomicAdd(&visible_count, 1u);
+    visible_out[slot] = vec2<u32>(gid, tier);
 }
 "#;

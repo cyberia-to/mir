@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod gpu;
 pub mod error;
 pub mod graph;
 pub mod epoch;

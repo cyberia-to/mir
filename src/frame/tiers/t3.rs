@@ -138,17 +138,17 @@ pub fn sort_by_depth(
 /// T3 Gaussian splat pass (compute).
 #[allow(dead_code)]
 pub struct T3Pass {
-    gpu:      aruminium::Gpu,
-    pipeline: aruminium::Pipeline,
-    queue:    aruminium::Queue,
+    gpu:      crate::gpu::Gpu,
+    pipeline: crate::gpu::Pipeline,
+    queue:    crate::gpu::Queue,
 }
 
 unsafe impl Send for T3Pass {}
 unsafe impl Sync for T3Pass {}
 
 impl T3Pass {
-    pub fn new() -> Result<Self, aruminium::GpuError> {
-        let gpu      = aruminium::Gpu::open()?;
+    pub fn new() -> Result<Self, crate::gpu::GpuError> {
+        let gpu      = crate::gpu::Gpu::open()?;
         let lib      = gpu.compile(SPLAT_MSL)?;
         let func     = lib.function("gaussian_splat")?;
         let pipeline = gpu.pipeline(&func)?;
@@ -170,12 +170,12 @@ impl T3Pass {
     pub fn draw(
         &self,
         sorted_indices: &[u32],
-        positions:      &aruminium::Buffer,
-        radii:          &aruminium::Buffer,
-        colors:         &aruminium::Buffer,
+        positions:      &crate::gpu::Buffer,
+        radii:          &crate::gpu::Buffer,
+        colors:         &crate::gpu::Buffer,
         camera:         &Camera,
         viewport:       [u32; 2],
-    ) -> Result<Vec<f32>, aruminium::GpuError> {
+    ) -> Result<Vec<f32>, crate::gpu::GpuError> {
         let [w, h] = viewport;
         let n = sorted_indices.len() as u32;
 

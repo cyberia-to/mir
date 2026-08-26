@@ -163,17 +163,17 @@ kernel void sphere_impostor(
 /// T2 sphere-impostor pass (compute).
 #[allow(dead_code)]
 pub struct T2Pass {
-    gpu:      aruminium::Gpu,
-    pipeline: aruminium::Pipeline,
-    queue:    aruminium::Queue,
+    gpu:      crate::gpu::Gpu,
+    pipeline: crate::gpu::Pipeline,
+    queue:    crate::gpu::Queue,
 }
 
 unsafe impl Send for T2Pass {}
 unsafe impl Sync for T2Pass {}
 
 impl T2Pass {
-    pub fn new() -> Result<Self, aruminium::GpuError> {
-        let gpu      = aruminium::Gpu::open()?;
+    pub fn new() -> Result<Self, crate::gpu::GpuError> {
+        let gpu      = crate::gpu::Gpu::open()?;
         let lib      = gpu.compile(IMPOSTOR_MSL)?;
         let func     = lib.function("sphere_impostor")?;
         let pipeline = gpu.pipeline(&func)?;
@@ -195,12 +195,12 @@ impl T2Pass {
     pub fn draw(
         &self,
         visible:   &[(u32, TierLevel)],
-        positions: &aruminium::Buffer,
-        radii:     &aruminium::Buffer,
-        colors:    &aruminium::Buffer,
+        positions: &crate::gpu::Buffer,
+        radii:     &crate::gpu::Buffer,
+        colors:    &crate::gpu::Buffer,
         camera:    &Camera,
         viewport:  [u32; 2],
-    ) -> Result<Vec<f32>, aruminium::GpuError> {
+    ) -> Result<Vec<f32>, crate::gpu::GpuError> {
         let [w, h] = viewport;
 
         // Gather T2-only particles into compact GPU buffers.

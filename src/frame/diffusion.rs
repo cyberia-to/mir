@@ -7,7 +7,7 @@ use crate::graph::Csr;
 pub fn diffusion_step(csr: &Csr, d_inv: &[f32], focus: &mut [f32]) {
     let n = csr.n;
     let mut next = vec![0.0f32; n];
-    acpu::sparse::csr_matvec_set(&csr.row_ptr, &csr.col_idx, &csr.values, focus, &mut next);
+    crate::backend::csr_matvec_set(&csr.row_ptr, &csr.col_idx, &csr.values, focus, &mut next);
     for i in 0..n {
         next[i] *= d_inv[i];
     }

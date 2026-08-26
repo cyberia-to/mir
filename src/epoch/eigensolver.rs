@@ -3,7 +3,7 @@
 //! Produces eigenvectors u₂, u₃, u₄ (skipping trivial u₁ = const) as the
 //! 3D spectral coordinates of each particle (R-1.0 §3).
 //!
-//! Uses `acpu::sparse::csr_matvec_set` for the sparse matrix-vector product
+//! Uses `crate::backend::csr_matvec_set` for the sparse matrix-vector product
 //! inside `laplacian_matvec`, and implements a full Lanczos iteration with
 //! QR eigendecomposition on the resulting tridiagonal matrix.
 
@@ -40,7 +40,7 @@ pub fn degree_vec(csr: &Csr) -> Vec<f32> {
 /// Normalized Laplacian matvec: y = ℒ x = x − D^{−½} A D^{−½} x.
 ///
 /// d_inv_sqrt[i] = 1/√D[i] (precomputed, 0 for isolated nodes).
-/// Uses `acpu::sparse::csr_matvec_set` for the A·z step.
+/// Uses `crate::backend::csr_matvec_set` for the A·z step.
 pub fn laplacian_matvec(csr: &Csr, d_inv_sqrt: &[f32], x: &[f32], y: &mut [f32]) {
     let n = csr.n;
     debug_assert_eq!(x.len(), n);
@@ -53,7 +53,7 @@ pub fn laplacian_matvec(csr: &Csr, d_inv_sqrt: &[f32], x: &[f32], y: &mut [f32])
     }
 
     // w = A · z  (csr_matvec_set: y = A·x)
-    acpu::sparse::csr_matvec_set(&csr.row_ptr, &csr.col_idx, &csr.values, &z, y);
+    crate::backend::csr_matvec_set(&csr.row_ptr, &csr.col_idx, &csr.values, &z, y);
 
     // y[i] = x[i] − d_inv_sqrt[i] * y[i]
     for i in 0..n {

@@ -158,12 +158,12 @@ pub struct WarpAnim {
 pub struct GpuBuffers {
     pub n_particles: usize,
     pub viewport:    [u32; 2],
-    pub gpu:         Option<aruminium::Gpu>,
-    pub pos_buf:     Option<aruminium::Buffer>,
-    pub rad_buf:     Option<aruminium::Buffer>,
-    pub col_buf:     Option<aruminium::Buffer>,
-    pub bvh_buf:     Option<aruminium::Buffer>,  // BvhNode array for cull pass
-    pub dummy_buf:   Option<aruminium::Buffer>,  // fallback when BVH not ready
+    pub gpu:         Option<crate::gpu::Gpu>,
+    pub pos_buf:     Option<crate::gpu::Buffer>,
+    pub rad_buf:     Option<crate::gpu::Buffer>,
+    pub col_buf:     Option<crate::gpu::Buffer>,
+    pub bvh_buf:     Option<crate::gpu::Buffer>,  // BvhNode array for cull pass
+    pub dummy_buf:   Option<crate::gpu::Buffer>,  // fallback when BVH not ready
     pub cull:        Option<CullPass>,
     pub t2:          Option<T2Pass>,
     pub t3:          Option<T3Pass>,
@@ -200,7 +200,7 @@ impl Default for GpuBuffers {
 impl GpuBuffers {
     pub fn new() -> Self {
         let mut s = Self::default();
-        match aruminium::Gpu::open() {
+        match crate::gpu::Gpu::open() {
             Ok(gpu) => {
                 s.cull      = CullPass::new()    .map_err(|e| warn!("mir: CullPass init: {e}")).ok();
                 s.t2        = T2Pass::new()      .map_err(|e| warn!("mir: T2Pass init: {e}")).ok();

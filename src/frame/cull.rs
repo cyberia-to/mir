@@ -39,9 +39,9 @@ pub struct Camera {
 /// GPU BVH frustum-cull + tier-assignment pass.
 #[allow(dead_code)]
 pub struct CullPass {
-    gpu:      aruminium::Gpu,
-    pipeline: aruminium::Pipeline,
-    queue:    aruminium::Queue,
+    gpu:      crate::gpu::Gpu,
+    pipeline: crate::gpu::Pipeline,
+    queue:    crate::gpu::Queue,
 }
 
 // SAFETY: Metal objects are thread-safe per Metal documentation.
@@ -49,8 +49,8 @@ unsafe impl Send for CullPass {}
 unsafe impl Sync for CullPass {}
 
 impl CullPass {
-    pub fn new() -> Result<Self, aruminium::GpuError> {
-        let gpu   = aruminium::Gpu::open()?;
+    pub fn new() -> Result<Self, crate::gpu::GpuError> {
+        let gpu   = crate::gpu::Gpu::open()?;
         let lib   = gpu.compile(BVH_CULL_MSL)?;
         let func  = lib.function("bvh_cull")?;
         let pipeline = gpu.pipeline(&func)?;
@@ -68,12 +68,12 @@ impl CullPass {
     /// * `n_particles` — number of particles
     pub fn run(
         &self,
-        positions:   &aruminium::Buffer,
-        radii:       &aruminium::Buffer,
-        bvh_nodes:   &aruminium::Buffer,
+        positions:   &crate::gpu::Buffer,
+        radii:       &crate::gpu::Buffer,
+        bvh_nodes:   &crate::gpu::Buffer,
         camera:      &Camera,
         n_particles: u32,
-    ) -> Result<VisibleSet, aruminium::GpuError> {
+    ) -> Result<VisibleSet, crate::gpu::GpuError> {
         // Output buffers:  visible_count (1 u32) + visible_out (n * 8 bytes).
         let count_buf = self.gpu.buffer(4)?;
         count_buf.write(|b| b[..4].fill(0));

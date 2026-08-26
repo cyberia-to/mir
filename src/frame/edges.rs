@@ -263,17 +263,17 @@ kernel void edge_line_rasterize(
 
 /// Compute-based edge line rasteriser for use in the frame render loop.
 pub struct EdgeLinePass {
-    gpu:      aruminium::Gpu,
-    pipeline: aruminium::Pipeline,
-    queue:    aruminium::Queue,
+    gpu:      crate::gpu::Gpu,
+    pipeline: crate::gpu::Pipeline,
+    queue:    crate::gpu::Queue,
 }
 
 unsafe impl Send for EdgeLinePass {}
 unsafe impl Sync for EdgeLinePass {}
 
 impl EdgeLinePass {
-    pub fn new() -> Result<Self, aruminium::GpuError> {
-        let gpu  = aruminium::Gpu::open()?;
+    pub fn new() -> Result<Self, crate::gpu::GpuError> {
+        let gpu  = crate::gpu::Gpu::open()?;
         let lib  = gpu.compile(EDGE_LINE_MSL)?;
         let func = lib.function("edge_line_rasterize")?;
         let pipeline = gpu.pipeline(&func)?;
@@ -293,12 +293,12 @@ impl EdgeLinePass {
         &self,
         pixels:    &mut Vec<f32>,
         edge_list: &[(u32, u32)],
-        pos_buf:   &aruminium::Buffer,
+        pos_buf:   &crate::gpu::Buffer,
         weights:   &[f32],
         flow_uvs:  &[f32],
         view_proj: &[[f32; 4]; 4],
         viewport:  [u32; 2],
-    ) -> Result<(), aruminium::GpuError> {
+    ) -> Result<(), crate::gpu::GpuError> {
         let n_edges = edge_list.len().min(weights.len()).min(flow_uvs.len());
         if n_edges == 0 { return Ok(()); }
 

@@ -214,3 +214,35 @@ mod tests {
         assert!(b.verify_topology(&epoch, &epoch));
     }
 }
+
+// ── §13.3 sparse kernels ──────────────────────────────────────────────────────
+
+/// Sparse CSR matrix-vector product: `y = A·x`.
+///
+/// One name for every platform. On Apple targets this forwards to
+/// `acpu::sparse::csr_matvec_set` (NEON, software prefetch); elsewhere it runs
+/// the portable loop below. Both compute the identical sum in the identical
+/// order — f32 accumulation left to right per row — so the result is
+/// bit-for-bit the same and conformance holds across backends.
+pub fn csr_matvec_set(row_ptr: &[u32], col_idx: &[u32], values: &[f32], x: &[f32], y: &mut [f32]) {
+    #[cfg(target_vendor = "apple")]
+    {
+        acpu::sparse::csr_matvec_set(row_ptr, col_idx, values, x, y);
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        let n = row_ptr.len().saturating_sub(1);
+        debug_assert_eq!(y.len(), n);
+        debug_assert_eq!(col_idx.len(), values.len());
+        y.fill(0.0);
+        for i in 0..n {
+            let s = row_ptr[i] as usize;
+            let e = row_ptr[i + 1] as usize;
+            let mut acc = 0.0f32;
+            for k in s..e {
+                acc += values[k] * x[col_idx[k] as usize];
+            }
+            y[i] = acc;
+        }
+    }
+}

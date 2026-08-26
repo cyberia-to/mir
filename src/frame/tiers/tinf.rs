@@ -59,17 +59,17 @@ kernel void tinf_background(
 
 /// T∞ background pass (compute).
 pub struct TInfPass {
-    gpu:      aruminium::Gpu,
-    pipeline: aruminium::Pipeline,
-    queue:    aruminium::Queue,
+    gpu:      crate::gpu::Gpu,
+    pipeline: crate::gpu::Pipeline,
+    queue:    crate::gpu::Queue,
 }
 
 unsafe impl Send for TInfPass {}
 unsafe impl Sync for TInfPass {}
 
 impl TInfPass {
-    pub fn new() -> Result<Self, aruminium::GpuError> {
-        let gpu      = aruminium::Gpu::open()?;
+    pub fn new() -> Result<Self, crate::gpu::GpuError> {
+        let gpu      = crate::gpu::Gpu::open()?;
         let lib      = gpu.compile(TINF_BG_MSL)?;
         let func     = lib.function("tinf_background")?;
         let pipeline = gpu.pipeline(&func)?;
@@ -88,7 +88,7 @@ impl TInfPass {
         cluster_color: [f32; 4],
         tau:           f32,
         viewport:      [u32; 2],
-    ) -> Result<(), aruminium::GpuError> {
+    ) -> Result<(), crate::gpu::GpuError> {
         let [w, h] = viewport;
         let pixel_count = (w * h) as usize;
         if pixels.len() < pixel_count * 4 {

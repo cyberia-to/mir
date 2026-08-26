@@ -52,20 +52,29 @@ mod wgpu_arm {
     }
 
     impl Gpu {
+        /// One device per process, like Metal's system default device: every
+        /// pass calls `open()` and they must all land on the same `Device`,
+        /// or buffers from one pass cannot bind into another's pipeline
+        /// (wgpu-core panics on the cross-hub id).
         pub fn open() -> Result<Self, GpuError> {
-            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-            let adapter = pollster::block_on(
-                instance.request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::HighPerformance,
-                    ..Default::default()
-                }),
-            )
-            .map_err(|_| GpuError::NoAdapter)?;
-            let (device, queue) = pollster::block_on(
-                adapter.request_device(&wgpu::DeviceDescriptor::default()),
-            )
-            .map_err(|e| GpuError::Device(e.to_string()))?;
-            Ok(Self { device: Arc::new(device), queue: Arc::new(queue) })
+            static GLOBAL: std::sync::OnceLock<Result<Gpu, GpuError>> = std::sync::OnceLock::new();
+            GLOBAL
+                .get_or_init(|| {
+                    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+                    let adapter = pollster::block_on(
+                        instance.request_adapter(&wgpu::RequestAdapterOptions {
+                            power_preference: wgpu::PowerPreference::HighPerformance,
+                            ..Default::default()
+                        }),
+                    )
+                    .map_err(|_| GpuError::NoAdapter)?;
+                    let (device, queue) = pollster::block_on(
+                        adapter.request_device(&wgpu::DeviceDescriptor::default()),
+                    )
+                    .map_err(|e| GpuError::Device(e.to_string()))?;
+                    Ok(Gpu { device: Arc::new(device), queue: Arc::new(queue) })
+                })
+                .clone()
         }
 
         /// Compile WGSL. An MSL source (a pass not yet ported) fails

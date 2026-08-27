@@ -9,7 +9,6 @@ use crate::epoch::EpochWorker;
 use crate::frame::cull::TierLevel;
 use crate::frame::diffusion::diffusion_step;
 
-use super::components::{TierLevel as CompTier, VisibleParticle};
 use super::resources::{EpochStateRes, GpuBuffers, GraphCamera, GraphWorldConfig, WarpTarget};
 
 #[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -137,16 +136,14 @@ pub fn tick_diffusion(mut gpu: ResMut<GpuBuffers>) {
     diffusion_step(&csr, &d_inv, &mut gpu.focus);
 }
 
-pub fn sync_visible_entities(
-    mut gpu:      ResMut<GpuBuffers>,
-    cam:          Res<GraphCamera>,
-    mut commands: Commands,
-    old_q:        Query<Entity, With<VisibleParticle>>,
-) {
+/// Cull, depth-sort and edge-gather — only when the camera actually moved.
+/// A still camera re-uses last frame's caches whole: no cull dispatch, no
+/// sort, no edge set rebuild, and (on the readback arms) no GPU stalls.
+pub fn sync_visible_entities(mut gpu: ResMut<GpuBuffers>, cam: Res<GraphCamera>) {
     if gpu.n_particles == 0 { return }
     let camera = cam.to_gpu_camera();
+    if gpu.cached_vp == Some(camera.view_proj) { return }
 
-    // Call CullPass with BVH buffer (or dummy if BVH not yet uploaded).
     let visible = if let (Some(cull), Some(pb), Some(rb)) =
         (&gpu.cull, &gpu.pos_buf, &gpu.rad_buf)
     {
@@ -158,19 +155,28 @@ pub fn sync_visible_entities(
         }
     } else { return };
 
-    for e in old_q.iter() { commands.entity(e).despawn(); }
-    for &(idx, tier) in &visible {
-        commands.spawn((VisibleParticle(idx), CompTier(tier as u8)));
-    }
-    {
-        static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if gpu.visible.len() != visible.len()
-            || !ONCE.swap(true, std::sync::atomic::Ordering::Relaxed)
-        {
-            debug!("mir: cull -> {} visible of {}", visible.len(), gpu.n_particles);
+    gpu.sorted = crate::frame::tiers::t3::sort_by_depth(&visible, &gpu.pos_cpu, &camera);
+
+    // Edges between visible particles, undirected, deduped by (min,max).
+    let vis_set: std::collections::HashSet<u32> =
+        visible.iter().map(|&(idx, _)| idx).collect();
+    let (mut edge_list, mut weights) = (Vec::new(), Vec::new());
+    if let Some(csr) = &gpu.csr {
+        for &p in &vis_set {
+            let (cols, vals) = csr.row(p as usize);
+            for (&q, &w) in cols.iter().zip(vals.iter()) {
+                if q > p && vis_set.contains(&q) {
+                    edge_list.push((p, q));
+                    weights.push(w);
+                }
+            }
         }
     }
+    debug!("mir: cull -> {} visible, {} edges", visible.len(), edge_list.len());
+    gpu.edge_list = edge_list;
+    gpu.edge_weights = weights;
     gpu.visible = visible;
+    gpu.cached_vp = Some(camera.view_proj);
 }
 
 // ── PostUpdate ────────────────────────────────────────────────────────────────
@@ -186,116 +192,86 @@ pub fn dispatch_tiers(
     if gpu.visible.is_empty() { return }
     let camera = cam.to_gpu_camera();
     let [w, h] = gpu.viewport;
-
-    // Read positions for CPU depth sort.
-    trace_step("read positions");
-    let positions: Vec<f32> = match &gpu.pos_buf {
-        Some(b) => b.read_f32(|s| s.to_vec()),
-        None => return,
-    };
-    trace_step("positions ok");
+    let pixel_count = (w as usize) * (h as usize);
 
     // One frame buffer for the whole chain: splats clear and fill it, sphere
-    // impostors composite over it, edges blend into it, and the CPU sees it
-    // once at the end. Allocated on first use and reused every frame.
-    let pixel_count = (w as usize) * (h as usize);
+    // impostors composite over it, edges blend into it, pack quantizes it —
+    // and the CPU maps only the packed quarter-size result, once.
     if gpu.frame_buf.as_ref().map(|b| b.size()) != Some(pixel_count * 16) {
         let Some(dev) = &gpu.gpu else { return };
-        match dev.buffer(pixel_count * 16) {
-            Ok(b) => gpu.frame_buf = Some(b),
-            Err(e) => { warn!("mir: frame buffer: {e}"); return }
+        match (dev.buffer(pixel_count * 16), dev.buffer(pixel_count * 4)) {
+            (Ok(b), Ok(b8)) => { gpu.frame_buf = Some(b); gpu.frame_u8 = Some(b8); }
+            (Err(e), _) | (_, Err(e)) => { warn!("mir: frame buffer: {e}"); return }
         }
     }
 
-    // T3 Gaussian splats (back-to-front sorted).
-    if let (Some(t3), Some(pb), Some(rb), Some(cb), Some(fb)) =
-        (&gpu.t3, &gpu.pos_buf, &gpu.rad_buf, &gpu.col_buf, &gpu.frame_buf)
-    {
-        use crate::frame::tiers::t3::sort_by_depth;
-        let sorted = sort_by_depth(&gpu.visible, &positions, &camera);
-        if !sorted.is_empty() {
+    // One command buffer for the whole chain — every pass encodes into it
+    // and the queue sees a single submission per frame.
+    let Some(cmd) = gpu.sync_queue.as_ref().and_then(|q| q.commands().ok()) else { return };
+
+    // T3 Gaussian splats (back-to-front, order cached until the camera moves).
+    if let (Some(t3), Some(fb)) = (&gpu.t3, &gpu.frame_buf) {
+        if !gpu.sorted.is_empty() {
             trace_step("t3.draw");
             let t0 = std::time::Instant::now();
-            let drawn = t3.draw(&sorted, pb, rb, cb, &camera, [w, h], fb);
+            let drawn = t3.draw(&gpu.sorted, &gpu.pos_cpu, &gpu.rad_cpu, &gpu.col_cpu,
+                                &camera, [w, h], fb, &cmd);
             timer.record(0, t0.elapsed().as_secs_f32() * 1000.0);
             if let Err(e) = drawn { warn!("T3: {e}"); }
         }
     }
 
     // T2 sphere impostors — composited over T3 inside the shader.
-    if let (Some(t2), Some(pb), Some(rb), Some(cb), Some(fb)) =
-        (&gpu.t2, &gpu.pos_buf, &gpu.rad_buf, &gpu.col_buf, &gpu.frame_buf)
-    {
+    if let (Some(t2), Some(fb)) = (&gpu.t2, &gpu.frame_buf) {
         if gpu.visible.iter().any(|(_, t)| *t == TierLevel::T2) {
             trace_step("t2.draw");
             let t0 = std::time::Instant::now();
-            let drawn = t2.draw(&gpu.visible, pb, rb, cb, &camera, [w, h], fb);
+            let drawn = t2.draw(&gpu.visible, &gpu.pos_cpu, &gpu.rad_cpu, &gpu.col_cpu,
+                                &camera, [w, h], fb, &cmd);
             timer.record(1, t0.elapsed().as_secs_f32() * 1000.0);
             if let Err(e) = drawn { warn!("T2: {e}"); }
         }
     }
 
-    // §8 Edge rasterization (T1/T2/T3 visible edges).
-    if let (Some(el), Some(pb), Some(csr), Some(fb)) =
-        (&gpu.edge_line, &gpu.pos_buf, &gpu.csr, &gpu.frame_buf)
-    {
-        // Build visible particle set.
-        let vis_set: std::collections::HashSet<u32> =
-            gpu.visible.iter().map(|&(idx, _)| idx).collect();
-
-        // Gather edges between visible particles.
-        let mut edge_list: Vec<(u32, u32)> = Vec::new();
-        let flow_offs = gpu.edge.flow_offsets().to_vec();
-        let mut weights: Vec<f32> = Vec::new();
-
-        for &p in &vis_set {
-            let (cols, vals) = csr.row(p as usize);
-            for (&q, &w) in cols.iter().zip(vals.iter()) {
-                if q > p && vis_set.contains(&q) {
-                    edge_list.push((p, q));
-                    weights.push(w);
-                }
-            }
-        }
-
-        let n_edges = edge_list.len();
-        let flow_uvs: Vec<f32> = (0..n_edges)
-            .map(|i| if i < flow_offs.len() { flow_offs[i] } else { 0.0 })
-            .collect();
-
-        let vp = cam.view_proj();
-        trace_step("edges");
-        if !edge_list.is_empty() {
+    // §8 Edge rasterization over the cached visible-edge set.
+    if let (Some(el), Some(pb), Some(fb)) = (&gpu.edge_line, &gpu.pos_buf, &gpu.frame_buf) {
+        if !gpu.edge_list.is_empty() {
+            let flow_offs = gpu.edge.flow_offsets();
+            let flow_uvs: Vec<f32> = (0..gpu.edge_list.len())
+                .map(|i| flow_offs.get(i).copied().unwrap_or(0.0))
+                .collect();
+            trace_step("edges");
             let t0 = std::time::Instant::now();
-            let _ = el.rasterize(fb, &edge_list, pb, &weights, &flow_uvs, &vp, [w, h]);
+            let _ = el.rasterize(fb, &gpu.edge_list, pb, &gpu.edge_weights,
+                                 &flow_uvs, &cam.view_proj(), [w, h], &cmd);
             timer.record(2, t0.elapsed().as_secs_f32() * 1000.0);
         }
     }
 
-    // One sync for the whole chain, then the single readback.
-    let t0 = std::time::Instant::now();
-    if let (Some(dev), Some(q)) = (&gpu.gpu, &gpu.sync_queue) {
-        let _ = dev.sync(q);
+    // Pack to RGBA8 on the GPU (background fill included), then fetch —
+    // async on the readback arms: this frame shows the previous frame's
+    // pixels and the CPU never waits for the GPU.
+    if let (Some(pack), Some(fb), Some(f8)) = (&gpu.pack, &gpu.frame_buf, &gpu.frame_u8) {
+        trace_step("pack");
+        if let Err(e) = pack.run(fb, f8, pixel_count as u32, &cmd) { warn!("pack: {e}"); }
     }
-    let Some(fb) = &gpu.frame_buf else { return };
-    let mut composite = fb.read_f32(|s| s.to_vec());
-    timer.record(3, t0.elapsed().as_secs_f32() * 1000.0);
-
-    // Background: pure black for all transparent pixels.
+    cmd.submit();
     let t0 = std::time::Instant::now();
-    for chunk in composite.chunks_mut(4) {
-        if chunk[3] < 0.5 {
-            chunk[0] = 0.0; chunk[1] = 0.0; chunk[2] = 0.0; chunk[3] = 1.0;
+    let mut pixels = gpu.last_pixels.take().unwrap_or_default();
+    pixels.resize(pixel_count * 4, 0);
+    {
+        let g = &mut *gpu;
+        if let (Some(dev), Some(q), Some(f8)) = (&g.gpu, &g.sync_queue, &g.frame_u8) {
+            g.reader.fetch(dev, q, f8, &mut pixels);
         }
     }
-
-    timer.record(4, t0.elapsed().as_secs_f32() * 1000.0);
+    timer.record(3, t0.elapsed().as_secs_f32() * 1000.0);
     timer.record(
-        5,
+        4,
         f32::from_bits(COMPOSITE_MS.load(std::sync::atomic::Ordering::Relaxed)),
     );
 
-    gpu.last_pixels = Some(composite);
+    gpu.last_pixels = Some(pixels);
 }
 
 
@@ -305,13 +281,13 @@ pub fn dispatch_tiers(
 #[derive(Default)]
 pub struct PassTimer {
     frames: u32,
-    total:  [f32; 6],
+    total:  [f32; 5],
     since:  f32,
 }
 
 impl PassTimer {
-    const NAMES: [&'static str; 6] =
-        ["t3", "t2", "edges", "readback", "bgfill", "toimage"];
+    const NAMES: [&'static str; 5] =
+        ["t3", "t2", "edges", "readback", "toimage"];
 
     fn record(&mut self, slot: usize, ms: f32) {
         self.total[slot] += ms;
@@ -366,9 +342,7 @@ pub fn composite(
     if data.len() != expected || pixels.len() < expected { return }
 
     let t0 = std::time::Instant::now();
-    for (dst, &src) in data.iter_mut().zip(pixels.iter()) {
-        *dst = (src.clamp(0.0, 1.0) * 255.0) as u8;
-    }
+    data.copy_from_slice(&pixels[..expected]);
     COMPOSITE_MS.store(
         (t0.elapsed().as_secs_f32() * 1000.0).to_bits(),
         std::sync::atomic::Ordering::Relaxed,
@@ -385,14 +359,12 @@ pub static COMPOSITE_MS: std::sync::atomic::AtomicU32 =
 
 pub fn on_exit_graph(
     mut commands: Commands,
-    particles_q:  Query<Entity, With<VisibleParticle>>,
     loading_q:    Query<Entity, With<LoadingOverlay>>,
     render_q:     Query<Entity, With<RenderOutput>>,
 ) {
     info!("mir: exiting graph world");
-    for e in particles_q.iter() { commands.entity(e).despawn(); }
-    for e in loading_q.iter()   { commands.entity(e).despawn(); }
-    for e in render_q.iter()    { commands.entity(e).despawn(); }
+    for e in loading_q.iter() { commands.entity(e).despawn(); }
+    for e in render_q.iter()  { commands.entity(e).despawn(); }
 }
 
 /// §9.4 Follow-flow: hold Alt to ride the attention current.
@@ -407,10 +379,8 @@ pub fn follow_flow_system(
     let held = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
     if !held { return; }
     let Some(csr) = &gpu.csr else { return };
-    let Some(pb)  = &gpu.pos_buf else { return };
     if gpu.n_particles == 0 { return; }
-    let positions = pb.read_f32(|s| s.to_vec());
-    apply_follow_flow(&mut cam, true, &positions, csr, time.delta_secs());
+    apply_follow_flow(&mut cam, true, &gpu.pos_cpu, csr, time.delta_secs());
 }
 
 /// §9.2 warp: consume the WarpTarget resource and initiate camera animation.
@@ -421,13 +391,12 @@ pub fn warp_to_system(
 ) {
     use super::camera::initiate_warp;
     let Some(idx) = target.particle_idx.take() else { return };
-    let Some(pb)  = &gpu.pos_buf else { return };
-    let Some(rb)  = &gpu.rad_buf else { return };
     let base = idx as usize * 3;
-    let center = pb.read_f32(|s| {
-        if base + 2 < s.len() { [s[base], s[base+1], s[base+2]] } else { [0.0f32; 3] }
-    });
-    let radius = rb.read_f32(|rs| if (idx as usize) < rs.len() { rs[idx as usize] } else { 10.0 });
+    let center: [f32; 3] = match gpu.pos_cpu.get(base..base + 3) {
+        Some(s) => [s[0], s[1], s[2]],
+        None => return,
+    };
+    let radius = gpu.rad_cpu.get(idx as usize).copied().unwrap_or(10.0);
     let cam_pos = [center[0], center[1], center[2] + radius * 3.0];
     initiate_warp(&mut cam, cam_pos, center);
 }

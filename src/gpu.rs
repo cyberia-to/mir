@@ -14,8 +14,29 @@ pub use aruminium::{Buffer, Commands, Encoder, Gpu, GpuError, Pipeline, Queue, S
 
 #[cfg(not(target_vendor = "apple"))]
 pub use wgpu_arm::{
-    Buffer, Commands, Encoder, Gpu, GpuError, Pipeline, Queue, Shader, ShaderLib, install_shared,
+    Buffer, Commands, Encoder, FrameReader, Gpu, GpuError, Pipeline, Queue, Shader, ShaderLib,
+    install_shared,
 };
+
+/// Per-frame readback of the packed frame, unified-memory arm: one sync,
+/// one mapped copy — the readback that was always cheap here stays sync.
+#[cfg(target_vendor = "apple")]
+#[derive(Default)]
+pub struct FrameReader;
+
+#[cfg(target_vendor = "apple")]
+impl FrameReader {
+    pub fn new() -> Self { Self }
+
+    pub fn fetch(&mut self, gpu: &Gpu, queue: &Queue, buf: &Buffer, dst: &mut Vec<u8>) -> bool {
+        let _ = gpu.sync(queue);
+        buf.read(|b| {
+            let n = b.len().min(dst.len());
+            dst[..n].copy_from_slice(&b[..n]);
+        });
+        true
+    }
+}
 
 #[cfg(not(target_vendor = "apple"))]
 mod wgpu_arm {
@@ -547,6 +568,77 @@ mod wgpu_arm {
 
         pub fn size(&self) -> usize {
             self.size
+        }
+    }
+
+    /// Latency-for-throughput frame readback: copy into a persistent staging
+    /// buffer and map it asynchronously — this frame consumes the *previous*
+    /// frame's pixels and never blocks on the GPU. The synchronous path here
+    /// drained the whole device queue (bevy's frame included) every frame,
+    /// which alone was two thirds of the frame budget on the Pixel 10.
+    pub struct FrameReader {
+        staging: Option<wgpu::Buffer>,
+        pending: Option<std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>>,
+    }
+
+    impl FrameReader {
+        pub fn new() -> Self {
+            Self { staging: None, pending: None }
+        }
+
+        /// Copy the newest completed frame into `dst`. Returns true when a
+        /// fresh frame landed; false leaves last frame's pixels standing.
+        pub fn fetch(&mut self, _gpu: &Gpu, _q: &Queue, buf: &Buffer, dst: &mut Vec<u8>) -> bool {
+            let device = &buf.gpu.device;
+            let size = buf.raw.size();
+            if self.staging.as_ref().map(|s| s.size()) != Some(size) {
+                self.staging = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("frame-staging"),
+                    size,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+                self.pending = None;
+            }
+            let staging = self.staging.as_ref().unwrap();
+
+            let mut fresh = false;
+            if let Some(rx) = &self.pending {
+                let _ = device.poll(wgpu::PollType::Poll);
+                match rx.try_recv() {
+                    Ok(Ok(())) => {
+                        let slice = staging.slice(..);
+                        let view = slice.get_mapped_range();
+                        let n = view.len().min(dst.len());
+                        dst[..n].copy_from_slice(&view[..n]);
+                        drop(view);
+                        staging.unmap();
+                        self.pending = None;
+                        fresh = true;
+                    }
+                    Ok(Err(_)) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.pending = None;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+
+            // Queue order does the synchronization: the copy lands after every
+            // pass already submitted this frame, and the map callback after
+            // the copy. No device-wide wait anywhere.
+            if self.pending.is_none() {
+                let mut encoder = device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                encoder.copy_buffer_to_buffer(&buf.raw, 0, staging, 0, size);
+                buf.gpu.queue.submit([encoder.finish()]);
+                let (tx, rx) = std::sync::mpsc::channel();
+                staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                    let _ = tx.send(r);
+                });
+                let _ = device.poll(wgpu::PollType::Poll);
+                self.pending = Some(rx);
+            }
+            fresh
         }
     }
 

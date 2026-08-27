@@ -298,6 +298,7 @@ impl EdgeLinePass {
         flow_uvs:  &[f32],
         view_proj: &[[f32; 4]; 4],
         viewport:  [u32; 2],
+        cmd:       &crate::gpu::Commands,
     ) -> Result<(), crate::gpu::GpuError> {
         let n_edges = edge_list.len().min(weights.len()).min(flow_uvs.len());
         if n_edges == 0 { return Ok(()); }
@@ -311,8 +312,6 @@ impl EdgeLinePass {
             .flat_map(|&(f, t)| [f, t])
             .collect();
 
-        let pos_bytes = pos_buf.read_f32(|s| s.to_vec());
-        let pos_buf_gpu = self.gpu.buffer_with_data(cast_u8_f32(&pos_bytes))?;
         let edge_buf   = self.gpu.buffer_with_data(cast_u8_u32(&edge_data))?;
         let w_buf      = self.gpu.buffer_with_data(cast_u8_f32(&weights[..n_edges]))?;
         let uv_buf     = self.gpu.buffer_with_data(cast_u8_f32(&flow_uvs[..n_edges]))?;
@@ -320,11 +319,10 @@ impl EdgeLinePass {
         let vp_bytes: [u8; 64] = unsafe { std::mem::transmute(*view_proj) };
         let viewport_bytes: [u8; 8] = unsafe { std::mem::transmute([w, h]) };
 
-        let cmd = self.queue.commands()?;
         let enc = cmd.encoder()?;
 
         enc.bind(&self.pipeline);
-        enc.bind_buffer(&pos_buf_gpu, 0, 0);
+        enc.bind_buffer(pos_buf,     0, 0);
         enc.bind_buffer(&edge_buf,   0, 1);
         enc.bind_buffer(&w_buf,      0, 2);
         enc.bind_buffer(&uv_buf,     0, 3);
@@ -334,8 +332,6 @@ impl EdgeLinePass {
 
         enc.launch((n_edges, 1, 1), (64, 1, 1));
         enc.finish();
-        // No wait here: the frame's single sync point covers every pass.
-        cmd.submit();
         Ok(())
     }
 }

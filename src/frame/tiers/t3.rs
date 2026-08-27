@@ -23,11 +23,10 @@ kernel void gaussian_splat(
     device const float  *sorted_positions [[buffer(0)]],  // n*3 f32 xyz
     device const float  *sorted_radii     [[buffer(1)]],  // n   f32
     device const float  *sorted_colors    [[buffer(2)]],  // n*3 f32 rgb
-    device const float  *sorted_opacity   [[buffer(3)]],  // n   f32
-    constant Camera     &camera           [[buffer(4)]],
-    constant uint       &n_splats         [[buffer(5)]],
-    constant uint2      &viewport         [[buffer(6)]],
-    device float4       *out_pixels       [[buffer(7)]],  // RGBA f32, row-major
+    constant Camera     &camera           [[buffer(3)]],
+    constant uint       &n_splats         [[buffer(4)]],
+    constant uint2      &viewport         [[buffer(5)]],
+    device float4       *out_pixels      [[buffer(6)]],  // RGBA f32, row-major
     uint2               gid               [[thread_position_in_grid]])
 {
     uint W = viewport.x;
@@ -50,7 +49,7 @@ kernel void gaussian_splat(
         float3 col     = float3(sorted_colors[i*3],
                                 sorted_colors[i*3+1],
                                 sorted_colors[i*3+2]);
-        float  opacity = sorted_opacity[i];
+        float  opacity = 1.0f;
 
         // Project center to clip space.
         float4 clip = camera.view_proj * float4(center, 1.0f);
@@ -156,26 +155,21 @@ impl T3Pass {
         Ok(Self { gpu, pipeline, queue })
     }
 
-    /// Render Gaussian splats and return an RGBA f32 pixel buffer.
+    /// Render Gaussian splats into the frame buffer.
     ///
-    /// # Arguments
-    /// * `sorted_indices` — particle indices sorted back-to-front (from `sort_by_depth`)
-    /// * `positions`      — all-particle position buffer (n×3 f32)
-    /// * `radii`          — all-particle radius buffer (n f32)
-    /// * `colors`         — all-particle color buffer (n×3 f32)
-    /// * `camera`         — camera uniforms
-    /// * `viewport`       — [width, height] in pixels
-    ///
-    /// Returns an RGBA f32 pixel buffer (width×height×4 f32 values).
+    /// `sorted_indices` — back-to-front (from `sort_by_depth`); `positions` /
+    /// `radii` / `colors` — the CPU epoch mirrors, gathered here without
+    /// touching a GPU buffer.
     pub fn draw(
         &self,
         sorted_indices: &[u32],
-        positions:      &crate::gpu::Buffer,
-        radii:          &crate::gpu::Buffer,
-        colors:         &crate::gpu::Buffer,
+        positions:      &[f32],
+        radii:          &[f32],
+        colors:         &[f32],
         camera:         &Camera,
         viewport:       [u32; 2],
         out_buf:        &crate::gpu::Buffer,
+        cmd:            &crate::gpu::Commands,
     ) -> Result<(), crate::gpu::GpuError> {
         let [w, h] = viewport;
         let n = sorted_indices.len() as u32;
@@ -187,37 +181,19 @@ impl T3Pass {
             return Ok(());
         }
 
-        // Gather sorted compact buffers on CPU.
-        let pos_data = positions.read_f32(|s| {
-            let mut d = Vec::with_capacity(n as usize * 3);
-            for &idx in sorted_indices {
-                let base = idx as usize * 3;
-                d.push(s[base]);
-                d.push(s[base + 1]);
-                d.push(s[base + 2]);
-            }
-            d
-        });
-        let rad_data = radii.read_f32(|s| {
-            sorted_indices.iter().map(|&i| s[i as usize]).collect::<Vec<_>>()
-        });
-        let col_data = colors.read_f32(|s| {
-            let mut d = Vec::with_capacity(n as usize * 3);
-            for &idx in sorted_indices {
-                let base = idx as usize * 3;
-                d.push(s[base]);
-                d.push(s[base + 1]);
-                d.push(s[base + 2]);
-            }
-            d
-        });
-        // Opacity: uniform 1.0 (spec §6.4 does not define a per-splat opacity buffer).
-        let opacity_data: Vec<f32> = vec![1.0f32; n as usize];
+        let mut pos_data = Vec::with_capacity(n as usize * 3);
+        let mut col_data = Vec::with_capacity(n as usize * 3);
+        let mut rad_data = Vec::with_capacity(n as usize);
+        for &idx in sorted_indices {
+            let base = idx as usize * 3;
+            pos_data.extend_from_slice(&positions[base..base + 3]);
+            col_data.extend_from_slice(&colors[base..base + 3]);
+            rad_data.push(radii[idx as usize]);
+        }
 
         let pos_buf = self.gpu.buffer_with_data(cast_f32(&pos_data))?;
         let rad_buf = self.gpu.buffer_with_data(cast_f32(&rad_data))?;
         let col_buf = self.gpu.buffer_with_data(cast_f32(&col_data))?;
-        let opa_buf = self.gpu.buffer_with_data(cast_f32(&opacity_data))?;
 
         let camera_bytes: &[u8] = unsafe {
             std::slice::from_raw_parts(
@@ -229,23 +205,19 @@ impl T3Pass {
         let n_bytes:  [u8; 4] = n.to_le_bytes();
         let vp_bytes: [u8; 8] = unsafe { std::mem::transmute([w, h]) };
 
-        let cmd = self.queue.commands()?;
         let enc = cmd.encoder()?;
 
         enc.bind(&self.pipeline);
         enc.bind_buffer(&pos_buf, 0, 0);
         enc.bind_buffer(&rad_buf, 0, 1);
         enc.bind_buffer(&col_buf, 0, 2);
-        enc.bind_buffer(&opa_buf, 0, 3);
-        enc.push(camera_bytes,      4);
-        enc.push(&n_bytes,          5);
-        enc.push(&vp_bytes,         6);
-        enc.bind_buffer(out_buf,  0, 7);
+        enc.push(camera_bytes,      3);
+        enc.push(&n_bytes,          4);
+        enc.push(&vp_bytes,         5);
+        enc.bind_buffer(out_buf,  0, 6);
 
         enc.launch((w as usize, h as usize, 1), (16, 16, 1));
         enc.finish();
-        // No wait here: the frame's single sync point covers every pass.
-        cmd.submit();
         Ok(())
     }
 }
@@ -274,11 +246,10 @@ struct Camera {
 @group(0) @binding(0) var<storage, read> sorted_positions: array<f32>;
 @group(0) @binding(1) var<storage, read> sorted_radii: array<f32>;
 @group(0) @binding(2) var<storage, read> sorted_colors: array<f32>;
-@group(0) @binding(3) var<storage, read> sorted_opacity: array<f32>;
-@group(0) @binding(4) var<uniform> camera: Camera;
-@group(0) @binding(5) var<uniform> n_splats: u32;
-@group(0) @binding(6) var<uniform> viewport: vec2<u32>;
-@group(0) @binding(7) var<storage, read_write> out_pixels: array<vec4<f32>>;
+@group(0) @binding(3) var<uniform> camera: Camera;
+@group(0) @binding(4) var<uniform> n_splats: u32;
+@group(0) @binding(5) var<uniform> viewport: vec2<u32>;
+@group(0) @binding(6) var<storage, read_write> out_pixels: array<vec4<f32>>;
 
 @compute @workgroup_size(16, 16)
 fn gaussian_splat(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -301,7 +272,7 @@ fn gaussian_splat(@builtin(global_invocation_id) gid: vec3<u32>) {
         let col = vec3<f32>(sorted_colors[i * 3u],
                             sorted_colors[i * 3u + 1u],
                             sorted_colors[i * 3u + 2u]);
-        let opacity = sorted_opacity[i];
+        let opacity = 1.0;
 
         let clip = camera.view_proj * vec4<f32>(center, 1.0);
         if (clip.w <= 0.0) { continue; }

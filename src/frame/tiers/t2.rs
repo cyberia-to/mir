@@ -187,24 +187,18 @@ impl T2Pass {
 
     /// Render T2-tier spheres into a pixel buffer.
     ///
-    /// # Arguments
-    /// * `visible`   — (particle_idx, tier) pairs from VisibleSet (only T2 entries used)
-    /// * `positions` — all-particle position buffer (n×3 f32)
-    /// * `radii`     — all-particle radius buffer (n f32)
-    /// * `colors`    — all-particle color buffer (n×3 f32)
-    /// * `camera`    — camera uniforms
-    /// * `viewport`  — [width, height] in pixels
-    ///
-    /// Returns an RGBA f32 pixel buffer (width×height×4 f32 values).
+    /// `visible` — (particle_idx, tier) pairs, only T2 entries used;
+    /// `positions` / `radii` / `colors` — the CPU epoch mirrors.
     pub fn draw(
         &self,
         visible:   &[(u32, TierLevel)],
-        positions: &crate::gpu::Buffer,
-        radii:     &crate::gpu::Buffer,
-        colors:    &crate::gpu::Buffer,
+        positions: &[f32],
+        radii:     &[f32],
+        colors:    &[f32],
         camera:    &Camera,
         viewport:  [u32; 2],
         out_buf:   &crate::gpu::Buffer,
+        cmd:       &crate::gpu::Commands,
     ) -> Result<(), crate::gpu::GpuError> {
         let [w, h] = viewport;
 
@@ -220,30 +214,15 @@ impl T2Pass {
             return Ok(());
         }
 
-        // Compact positions, radii, colors by gathering from CPU side.
-        let pos_data = positions.read_f32(|s| {
-            let mut d = Vec::with_capacity(n as usize * 3);
-            for &idx in &t2_indices {
-                let base = idx as usize * 3;
-                d.push(s[base]);
-                d.push(s[base + 1]);
-                d.push(s[base + 2]);
-            }
-            d
-        });
-        let rad_data = radii.read_f32(|s| {
-            t2_indices.iter().map(|&i| s[i as usize]).collect::<Vec<_>>()
-        });
-        let col_data = colors.read_f32(|s| {
-            let mut d = Vec::with_capacity(n as usize * 3);
-            for &idx in &t2_indices {
-                let base = idx as usize * 3;
-                d.push(s[base]);
-                d.push(s[base + 1]);
-                d.push(s[base + 2]);
-            }
-            d
-        });
+        let mut pos_data = Vec::with_capacity(n as usize * 3);
+        let mut col_data = Vec::with_capacity(n as usize * 3);
+        let mut rad_data = Vec::with_capacity(n as usize);
+        for &idx in &t2_indices {
+            let base = idx as usize * 3;
+            pos_data.extend_from_slice(&positions[base..base + 3]);
+            col_data.extend_from_slice(&colors[base..base + 3]);
+            rad_data.push(radii[idx as usize]);
+        }
 
         let pos_buf = self.gpu.buffer_with_data(bytemuck_cast_f32(&pos_data))?;
         let rad_buf = self.gpu.buffer_with_data(bytemuck_cast_f32(&rad_data))?;
@@ -262,7 +241,6 @@ impl T2Pass {
         let vp_bytes = [w, h];
         let vp_raw: [u8; 8] = unsafe { std::mem::transmute(vp_bytes) };
 
-        let cmd = self.queue.commands()?;
         let enc = cmd.encoder()?;
 
         enc.bind(&self.pipeline);
@@ -276,8 +254,6 @@ impl T2Pass {
 
         enc.launch((w as usize, h as usize, 1), (16, 16, 1));
         enc.finish();
-        // No wait here: the frame's single sync point covers every pass.
-        cmd.submit();
         Ok(())
     }
 }

@@ -4,10 +4,10 @@ use std::sync::{Arc, RwLock};
 use bevy::prelude::*;
 
 use crate::epoch::EpochState;
+use crate::frame::composite::PackPass;
 use crate::frame::cull::CullPass;
 use crate::frame::tiers::t2::T2Pass;
 use crate::frame::tiers::t3::T3Pass;
-use crate::frame::tiers::tinf::TInfPass;
 use crate::frame::edges::{EdgePass, EdgeLinePass};
 use crate::graph::Csr;
 
@@ -194,18 +194,33 @@ pub struct GpuBuffers {
     pub cull:        Option<CullPass>,
     pub t2:          Option<T2Pass>,
     pub t3:          Option<T3Pass>,
-    pub tinf:        Option<TInfPass>,
     pub edge:        EdgePass,
     pub edge_line:   Option<EdgeLinePass>,
+    pub pack:        Option<PackPass>,
     pub focus:       Vec<f32>,
     pub csr:         Option<Arc<Csr>>,
     pub d_inv:       Vec<f32>,
     pub visible:     Vec<(u32, crate::frame::cull::TierLevel)>,
+    /// CPU mirrors of the static epoch buffers. Positions never change after
+    /// upload, so every sort/gather reads these instead of mapping the GPU
+    /// buffers — the per-frame readback stalls were most of a frame.
+    pub pos_cpu:     Vec<f32>,
+    pub rad_cpu:     Vec<f32>,
+    pub col_cpu:     Vec<f32>,
+    /// view_proj the cull/sort/edge caches were built for. Camera still →
+    /// caches stand, no cull dispatch, no re-sort, no edge regather.
+    pub cached_vp:   Option<[[f32; 4]; 4]>,
+    pub sorted:      Vec<u32>,
+    pub edge_list:   Vec<(u32, u32)>,
+    pub edge_weights: Vec<f32>,
     /// The frame buffer every pass composites into — allocated once, reused.
     /// Keeping it on the GPU is what makes the chain one readback instead of
     /// four full-frame transfers.
     pub frame_buf:   Option<crate::gpu::Buffer>,
-    pub last_pixels: Option<Vec<f32>>,  // RGBA f32, W×H×4
+    /// Packed RGBA8 output of the pack kernel — the only buffer the CPU maps.
+    pub frame_u8:    Option<crate::gpu::Buffer>,
+    pub reader:      crate::gpu::FrameReader,
+    pub last_pixels: Option<Vec<u8>>,  // RGBA8, W×H×4
     pub output_image: Option<Handle<Image>>,
 }
 
@@ -220,10 +235,16 @@ impl Default for GpuBuffers {
             n_particles: 0, viewport: [1280, 720],
             gpu: None, sync_queue: None, pos_buf: None, rad_buf: None, col_buf: None,
             bvh_buf: None, dummy_buf: None,
-            cull: None, t2: None, t3: None, tinf: None, edge_line: None,
+            cull: None, t2: None, t3: None, edge_line: None, pack: None,
             edge: EdgePass::new(0),
             focus: Vec::new(), csr: None, d_inv: Vec::new(),
-            visible: Vec::new(), frame_buf: None, last_pixels: None, output_image: None,
+            visible: Vec::new(),
+            pos_cpu: Vec::new(), rad_cpu: Vec::new(), col_cpu: Vec::new(),
+            cached_vp: None, sorted: Vec::new(),
+            edge_list: Vec::new(), edge_weights: Vec::new(),
+            frame_buf: None, frame_u8: None,
+            reader: crate::gpu::FrameReader::new(),
+            last_pixels: None, output_image: None,
         }
     }
 }
@@ -236,8 +257,8 @@ impl GpuBuffers {
                 s.cull      = CullPass::new()    .map_err(|e| warn!("mir: CullPass init: {e}")).ok();
                 s.t2        = T2Pass::new()      .map_err(|e| warn!("mir: T2Pass init: {e}")).ok();
                 s.t3        = T3Pass::new()      .map_err(|e| warn!("mir: T3Pass init: {e}")).ok();
-                s.tinf      = TInfPass::new()    .map_err(|e| warn!("mir: TInfPass init: {e}")).ok();
                 s.edge_line = EdgeLinePass::new().map_err(|e| warn!("mir: EdgeLinePass init: {e}")).ok();
+                s.pack      = PackPass::new()    .map_err(|e| warn!("mir: PackPass init: {e}")).ok();
                 s.dummy_buf  = gpu.buffer(4).ok();
                 s.sync_queue = gpu.new_command_queue().ok();
                 s.gpu        = Some(gpu);
@@ -255,6 +276,10 @@ impl GpuBuffers {
         self.n_particles = epoch.positions.len() / 3;
         self.focus  = epoch.focus.clone();
         self.d_inv  = epoch.d_inv.clone();
+        self.pos_cpu = epoch.positions.clone();
+        self.rad_cpu = epoch.radii.clone();
+        self.col_cpu = epoch.colors.clone();
+        self.cached_vp = None;
 
         let Some(gpu) = &self.gpu else { return };
         self.pos_buf = gpu.buffer_with_data(cast_f32(&epoch.positions)).ok();

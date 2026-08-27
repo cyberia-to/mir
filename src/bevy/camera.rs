@@ -3,8 +3,9 @@
 
 use bevy::ecs::message::MessageReader;
 use bevy::input::mouse::MouseWheel;
+use bevy::input::touch::Touches;
 use bevy::prelude::*;
-use super::resources::{GraphCamera, WarpAnim};
+use super::resources::{GraphCamera, TouchPose, WarpAnim};
 
 const TAU_MIN:   f32 = 0.01;
 const TAU_MAX:   f32 = 100.0;
@@ -19,6 +20,7 @@ pub fn update_camera(
     mut cam:    ResMut<GraphCamera>,
     buttons:    Res<ButtonInput<MouseButton>>,
     keys:       Res<ButtonInput<KeyCode>>,
+    touches:    Res<Touches>,
     mut cursor: MessageReader<CursorMoved>,
     mut scroll: MessageReader<MouseWheel>,
     time:       Res<Time>,
@@ -49,6 +51,8 @@ pub fn update_camera(
         update_tau_from_position(&mut cam);
         return;
     }
+
+    apply_touch(&mut cam, &touches);
 
     // Scroll → smooth zoom. Clamp ev.y so a fast trackpad swipe doesn't jump.
     for ev in scroll.read() {
@@ -95,17 +99,99 @@ pub fn update_camera(
     if keys.pressed(KeyCode::KeyQ) || keys.pressed(KeyCode::Minus)      { cam.orbit_dist = (cam.orbit_dist * zoom).clamp(50.0, 30000.0); }
     if keys.pressed(KeyCode::KeyE) || keys.pressed(KeyCode::Equal)      { cam.orbit_dist = (cam.orbit_dist / zoom).clamp(50.0, 30000.0); }
 
-    // Recompute position from spherical orbit coordinates (orbit around origin).
-    // forward() = [cp*sy, sp, -cp*cy]
-    // position  = -dist * forward = [-dist*cp*sy, -dist*sp, dist*cp*cy]
+    // Recompute position from spherical orbit coordinates around the target.
+    // forward() = [cp*sy, sp, -cp*cy]; the eye sits `orbit_dist` behind it.
     let (sy, cy) = cam.yaw.sin_cos();
     let (sp, cp) = cam.pitch.sin_cos();
     let d = cam.orbit_dist;
-    cam.position = [-d * cp * sy, -d * sp, d * cp * cy];
+    let t = cam.target;
+    cam.position = [t[0] - d * cp * sy, t[1] - d * sp, t[2] + d * cp * cy];
 
     let gap = cam.tau_target - cam.tau;
     cam.tau += gap * (DAMPING * dt).min(1.0);
     update_tau_from_position(&mut cam);
+}
+
+/// Touch navigation: one finger orbits, two pan, pinch and twist.
+///
+/// Touches inside `input_inset` belong to the host's chrome — the camera
+/// never sees them, so a thumb on the tab strip does not spin the graph.
+fn apply_touch(cam: &mut GraphCamera, touches: &Touches) {
+    let [top, bottom, left, right] = cam.input_inset;
+    let [vw, vh] = cam.viewport;
+    let live: Vec<[f32; 2]> = touches
+        .iter()
+        .map(|t| [t.position().x, t.position().y])
+        .filter(|p| {
+            p[1] >= top && p[1] <= (vh - bottom).max(top) && p[0] >= left && p[0] <= (vw - right).max(left)
+        })
+        .collect();
+
+    if live.is_empty() {
+        cam.touch_prev = None;
+        return;
+    }
+
+    let n = live.len() as f32;
+    let centroid = [
+        live.iter().map(|p| p[0]).sum::<f32>() / n,
+        live.iter().map(|p| p[1]).sum::<f32>() / n,
+    ];
+    let (spread, angle) = if live.len() >= 2 {
+        let dx = live[1][0] - live[0][0];
+        let dy = live[1][1] - live[0][1];
+        ((dx * dx + dy * dy).sqrt(), dy.atan2(dx))
+    } else {
+        (0.0, 0.0)
+    };
+    let pose = TouchPose { count: live.len(), centroid, spread, angle };
+
+    // A finger landing or lifting changes the pose discontinuously; re-seed
+    // rather than translating the jump into camera motion.
+    let Some(prev) = cam.touch_prev else {
+        cam.touch_prev = Some(pose);
+        return;
+    };
+    if prev.count != pose.count {
+        cam.touch_prev = Some(pose);
+        return;
+    }
+
+    let dx = centroid[0] - prev.centroid[0];
+    let dy = centroid[1] - prev.centroid[1];
+
+    if pose.count == 1 {
+        // Orbit, same sensitivity as a mouse drag.
+        cam.yaw -= dx * LOOK_SENS;
+        cam.pitch = (cam.pitch + dy * LOOK_SENS).clamp(
+            -std::f32::consts::FRAC_PI_2 + 0.01,
+            std::f32::consts::FRAC_PI_2 - 0.01,
+        );
+    } else {
+        // Pinch → zoom. The ratio of spreads is scale-free, so the same
+        // finger travel zooms the same amount at any distance.
+        if prev.spread > 1.0 && pose.spread > 1.0 {
+            cam.orbit_dist =
+                (cam.orbit_dist * (prev.spread / pose.spread)).clamp(50.0, 30000.0);
+        }
+        // Twist → yaw, so the graph turns under the fingers.
+        let mut twist = pose.angle - prev.angle;
+        if twist > std::f32::consts::PI { twist -= std::f32::consts::TAU; }
+        if twist < -std::f32::consts::PI { twist += std::f32::consts::TAU; }
+        cam.yaw += twist;
+
+        // Drag → pan the orbit target across the view plane. Scaled so the
+        // point under the fingers keeps up with them.
+        let world_per_px = 2.0 * cam.orbit_dist * (cam.fov * 0.5).tan() / vh.max(1.0);
+        let right_v = cam.right();
+        let up_v = cam.up();
+        for i in 0..3 {
+            cam.target[i] -= right_v[i] * dx * world_per_px;
+            cam.target[i] += up_v[i] * dy * world_per_px;
+        }
+    }
+
+    cam.touch_prev = Some(pose);
 }
 
 /// §9.4 Follow-flow.

@@ -22,6 +22,17 @@ pub struct GraphWorldConfig {
     pub graph: Arc<Csr>,
 }
 
+/// The pose of a multi-touch gesture: where the fingers are together, how
+/// far apart, and at what angle. Frame-to-frame deltas of these three are
+/// pan, pinch and twist.
+#[derive(Clone, Copy)]
+pub struct TouchPose {
+    pub count:    usize,
+    pub centroid: [f32; 2],
+    pub spread:   f32,
+    pub angle:    f32,
+}
+
 /// 6DOF camera with heat-kernel τ zoom.
 #[derive(Resource)]
 pub struct GraphCamera {
@@ -37,8 +48,17 @@ pub struct GraphCamera {
     /// Orbit radius (distance from origin). Derived from position on init,
     /// then driven by scroll; position is recomputed from (yaw,pitch,orbit_dist) each frame.
     pub orbit_dist: f32,
+    /// Point the camera orbits and looks at. Panning moves this; the eye
+    /// follows at `orbit_dist` along the current yaw/pitch.
+    pub target: [f32; 3],
     /// Last known cursor position for delta computation (pixels).
     pub last_cursor: Option<[f32; 2]>,
+    /// Previous frame's multi-touch pose, for gesture deltas.
+    pub touch_prev: Option<TouchPose>,
+    /// Screen margins the host's chrome occupies, in logical pixels
+    /// (top, bottom, left, right). Touches landing inside are the chrome's,
+    /// not the camera's — mir never learns what the chrome *is*.
+    pub input_inset: [f32; 4],
     /// Active §9.2 warp animation (None if free-fly).
     pub warp:     Option<WarpAnim>,
 }
@@ -47,6 +67,9 @@ impl Default for GraphCamera {
     fn default() -> Self {
         Self {
             position: [0.0, 0.0, 3000.0],
+            target: [0.0, 0.0, 0.0],
+            touch_prev: None,
+            input_inset: [0.0; 4],
             yaw: 0.0, pitch: 0.0,
             fov: std::f32::consts::FRAC_PI_3,
             near: 1.0, far: 100_000.0,
@@ -69,7 +92,7 @@ impl GraphCamera {
         let (sy, cy) = self.yaw.sin_cos();
         [cy, 0.0, sy]
     }
-    fn up(&self) -> [f32; 3] {
+    pub fn up(&self) -> [f32; 3] {
         let r = self.right(); let f = self.forward();
         [r[1]*f[2]-r[2]*f[1], r[2]*f[0]-r[0]*f[2], r[0]*f[1]-r[1]*f[0]]
     }
@@ -174,6 +197,10 @@ pub struct GpuBuffers {
     pub csr:         Option<Arc<Csr>>,
     pub d_inv:       Vec<f32>,
     pub visible:     Vec<(u32, crate::frame::cull::TierLevel)>,
+    /// The frame buffer every pass composites into — allocated once, reused.
+    /// Keeping it on the GPU is what makes the chain one readback instead of
+    /// four full-frame transfers.
+    pub frame_buf:   Option<crate::gpu::Buffer>,
     pub last_pixels: Option<Vec<f32>>,  // RGBA f32, W×H×4
     pub output_image: Option<Handle<Image>>,
 }
@@ -192,7 +219,7 @@ impl Default for GpuBuffers {
             cull: None, t2: None, t3: None, tinf: None, edge_line: None,
             edge: EdgePass::new(0),
             focus: Vec::new(), csr: None, d_inv: Vec::new(),
-            visible: Vec::new(), last_pixels: None, output_image: None,
+            visible: Vec::new(), frame_buf: None, last_pixels: None, output_image: None,
         }
     }
 }

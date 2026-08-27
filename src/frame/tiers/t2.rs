@@ -156,7 +156,11 @@ kernel void sphere_impostor(
         result = float4(shade, 1.0f);
     }
 
-    out_pixels[gid.y * W + gid.x] = result;
+    // Miss keeps whatever the layer beneath wrote — the pass composites
+    // over the frame buffer instead of owning it.
+    if (hit_any) {
+        out_pixels[gid.y * W + gid.x] = result;
+    }
 }
 "#;
 
@@ -200,7 +204,8 @@ impl T2Pass {
         colors:    &crate::gpu::Buffer,
         camera:    &Camera,
         viewport:  [u32; 2],
-    ) -> Result<Vec<f32>, crate::gpu::GpuError> {
+        out_buf:   &crate::gpu::Buffer,
+    ) -> Result<(), crate::gpu::GpuError> {
         let [w, h] = viewport;
 
         // Gather T2-only particles into compact GPU buffers.
@@ -212,7 +217,7 @@ impl T2Pass {
 
         let n = t2_indices.len() as u32;
         if n == 0 {
-            return Ok(vec![0.0f32; (w * h * 4) as usize]);
+            return Ok(());
         }
 
         // Compact positions, radii, colors by gathering from CPU side.
@@ -245,8 +250,6 @@ impl T2Pass {
         let col_buf = self.gpu.buffer_with_data(bytemuck_cast_f32(&col_data))?;
 
         // Output pixel buffer.
-        let pixel_count = (w * h) as usize;
-        let out_buf = self.gpu.buffer(pixel_count * 16)?; // 4 f32 × 4 bytes
 
         let camera_bytes: &[u8] = unsafe {
             std::slice::from_raw_parts(
@@ -269,15 +272,13 @@ impl T2Pass {
         enc.push(camera_bytes,      3);
         enc.push(&n_bytes,          4);
         enc.push(&vp_raw,           5);
-        enc.bind_buffer(&out_buf, 0, 6);
+        enc.bind_buffer(out_buf,  0, 6);
 
         enc.launch((w as usize, h as usize, 1), (16, 16, 1));
         enc.finish();
         cmd.submit();
         cmd.wait();
-
-        let pixels = out_buf.read_f32(|s| s.to_vec());
-        Ok(pixels)
+        Ok(())
     }
 }
 
@@ -379,6 +380,10 @@ fn sphere_impostor(@builtin(global_invocation_id) gid: vec3<u32>) {
         result = vec4<f32>(shade, 1.0);
     }
 
-    out_pixels[gid.y * W + gid.x] = result;
+    // Miss keeps whatever the layer beneath wrote — the pass composites
+    // over the frame buffer instead of owning it.
+    if (hit_any) {
+        out_pixels[gid.y * W + gid.x] = result;
+    }
 }
 "#;

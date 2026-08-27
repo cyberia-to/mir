@@ -152,9 +152,13 @@ pub fn sync_visible_entities(
 // ── PostUpdate ────────────────────────────────────────────────────────────────
 
 pub fn dispatch_tiers(
-    mut gpu: ResMut<GpuBuffers>,
-    cam:     Res<GraphCamera>,
+    mut gpu:   ResMut<GpuBuffers>,
+    cam:       Res<GraphCamera>,
+    time:      Res<Time>,
+    mut timer: Local<PassTimer>,
 ) {
+    let dt = time.delta_secs();
+    timer.frame(dt);
     if gpu.visible.is_empty() { return }
     let camera = cam.to_gpu_camera();
     let [w, h] = gpu.viewport;
@@ -167,52 +171,49 @@ pub fn dispatch_tiers(
     };
     trace_step("positions ok");
 
-    let mut composite = vec![0.0f32; (w as usize) * (h as usize) * 4];
+    // One frame buffer for the whole chain: splats clear and fill it, sphere
+    // impostors composite over it, edges blend into it, and the CPU sees it
+    // once at the end. Allocated on first use and reused every frame.
+    let pixel_count = (w as usize) * (h as usize);
+    if gpu.frame_buf.as_ref().map(|b| b.size()) != Some(pixel_count * 16) {
+        let Some(dev) = &gpu.gpu else { return };
+        match dev.buffer(pixel_count * 16) {
+            Ok(b) => gpu.frame_buf = Some(b),
+            Err(e) => { warn!("mir: frame buffer: {e}"); return }
+        }
+    }
 
     // T3 Gaussian splats (back-to-front sorted).
-    if let (Some(t3), Some(pb), Some(rb), Some(cb)) =
-        (&gpu.t3, &gpu.pos_buf, &gpu.rad_buf, &gpu.col_buf)
+    if let (Some(t3), Some(pb), Some(rb), Some(cb), Some(fb)) =
+        (&gpu.t3, &gpu.pos_buf, &gpu.rad_buf, &gpu.col_buf, &gpu.frame_buf)
     {
         use crate::frame::tiers::t3::sort_by_depth;
         let sorted = sort_by_depth(&gpu.visible, &positions, &camera);
         if !sorted.is_empty() {
             trace_step("t3.draw");
-            match t3.draw(&sorted, pb, rb, cb, &camera, [w, h]) {
-                Ok(pixels) => {
-                    let copy_len = composite.len().min(pixels.len());
-                    composite[..copy_len].copy_from_slice(&pixels[..copy_len]);
-                }
-                Err(e) => warn!("T3: {e}"),
-            }
+            let t0 = std::time::Instant::now();
+            let drawn = t3.draw(&sorted, pb, rb, cb, &camera, [w, h], fb);
+            timer.record(0, t0.elapsed().as_secs_f32() * 1000.0);
+            if let Err(e) = drawn { warn!("T3: {e}"); }
         }
     }
 
-    // T2 sphere impostors (painted over T3).
-    if let (Some(t2), Some(pb), Some(rb), Some(cb)) =
-        (&gpu.t2, &gpu.pos_buf, &gpu.rad_buf, &gpu.col_buf)
+    // T2 sphere impostors — composited over T3 inside the shader.
+    if let (Some(t2), Some(pb), Some(rb), Some(cb), Some(fb)) =
+        (&gpu.t2, &gpu.pos_buf, &gpu.rad_buf, &gpu.col_buf, &gpu.frame_buf)
     {
         if gpu.visible.iter().any(|(_, t)| *t == TierLevel::T2) {
             trace_step("t2.draw");
-            match t2.draw(&gpu.visible, pb, rb, cb, &camera, [w, h]) {
-                Ok(pixels) => {
-                    // Alpha-composite T2 over T3: T2 pixel alpha in .w component.
-                    for (i, chunk) in pixels.chunks(4).enumerate() {
-                        if chunk.len() == 4 && chunk[3] > 0.5 {
-                            let base = i * 4;
-                            if base + 4 <= composite.len() {
-                                composite[base..base+4].copy_from_slice(chunk);
-                            }
-                        }
-                    }
-                }
-                Err(e) => warn!("T2: {e}"),
-            }
+            let t0 = std::time::Instant::now();
+            let drawn = t2.draw(&gpu.visible, pb, rb, cb, &camera, [w, h], fb);
+            timer.record(1, t0.elapsed().as_secs_f32() * 1000.0);
+            if let Err(e) = drawn { warn!("T2: {e}"); }
         }
     }
 
     // §8 Edge rasterization (T1/T2/T3 visible edges).
-    if let (Some(el), Some(pb), Some(csr)) =
-        (&gpu.edge_line, &gpu.pos_buf, &gpu.csr)
+    if let (Some(el), Some(pb), Some(csr), Some(fb)) =
+        (&gpu.edge_line, &gpu.pos_buf, &gpu.csr, &gpu.frame_buf)
     {
         // Build visible particle set.
         let vis_set: std::collections::HashSet<u32> =
@@ -233,8 +234,6 @@ pub fn dispatch_tiers(
             }
         }
 
-        // Resize EdgePass flow offsets if needed.
-        // (flow_offs already grabbed; resize separately since we have &gpu.edge_line)
         let n_edges = edge_list.len();
         let flow_uvs: Vec<f32> = (0..n_edges)
             .map(|i| if i < flow_offs.len() { flow_offs[i] } else { 0.0 })
@@ -243,32 +242,70 @@ pub fn dispatch_tiers(
         let vp = cam.view_proj();
         trace_step("edges");
         if !edge_list.is_empty() {
-            let _ = el.rasterize(
-                &mut composite,
-                &edge_list,
-                pb,
-                &weights,
-                &flow_uvs,
-                &vp,
-                [w, h],
-            );
+            let t0 = std::time::Instant::now();
+            let _ = el.rasterize(fb, &edge_list, pb, &weights, &flow_uvs, &vp, [w, h]);
+            timer.record(2, t0.elapsed().as_secs_f32() * 1000.0);
         }
     }
 
+    // The single readback of the frame.
+    let t0 = std::time::Instant::now();
+    let Some(fb) = &gpu.frame_buf else { return };
+    let mut composite = fb.read_f32(|s| s.to_vec());
+    timer.record(3, t0.elapsed().as_secs_f32() * 1000.0);
+
     // Background: pure black for all transparent pixels.
+    let t0 = std::time::Instant::now();
     for chunk in composite.chunks_mut(4) {
         if chunk[3] < 0.5 {
             chunk[0] = 0.0; chunk[1] = 0.0; chunk[2] = 0.0; chunk[3] = 1.0;
         }
     }
 
-    {
-        let lit = composite.chunks(4).filter(|c| c[0] + c[1] + c[2] > 0.01).count();
-        debug!("mir: composite {} lit pixels", lit);
-    }
+    timer.record(4, t0.elapsed().as_secs_f32() * 1000.0);
+    timer.record(
+        5,
+        f32::from_bits(COMPOSITE_MS.load(std::sync::atomic::Ordering::Relaxed)),
+    );
+
     gpu.last_pixels = Some(composite);
 }
 
+
+/// Per-pass frame budget, averaged over a window and logged once a second.
+/// The graph world is the only place cyb can be slow, and it is slow in one
+/// of four places — this says which without a profiler on the device.
+#[derive(Default)]
+pub struct PassTimer {
+    frames: u32,
+    total:  [f32; 6],
+    since:  f32,
+}
+
+impl PassTimer {
+    const NAMES: [&'static str; 6] =
+        ["t3", "t2", "edges", "readback", "bgfill", "toimage"];
+
+    fn record(&mut self, slot: usize, ms: f32) {
+        self.total[slot] += ms;
+    }
+
+    fn frame(&mut self, dt: f32) {
+        self.frames += 1;
+        self.since += dt;
+        if self.since < 1.0 {
+            return;
+        }
+        let f = self.frames.max(1) as f32;
+        let parts: Vec<String> = Self::NAMES
+            .iter()
+            .zip(self.total.iter())
+            .map(|(n, t)| format!("{n} {:.1}ms", t / f))
+            .collect();
+        info!("mir: {:.1} fps — {}", f / self.since, parts.join(", "));
+        *self = Self::default();
+    }
+}
 
 /// One-shot step tracer for bringing the pipeline up on a new driver.
 fn trace_step(step: &str) {
@@ -301,10 +338,21 @@ pub fn composite(
     let expected = (w as usize) * (h as usize) * 4;
     if data.len() != expected || pixels.len() < expected { return }
 
+    let t0 = std::time::Instant::now();
     for (dst, &src) in data.iter_mut().zip(pixels.iter()) {
         *dst = (src.clamp(0.0, 1.0) * 255.0) as u8;
     }
+    COMPOSITE_MS.store(
+        (t0.elapsed().as_secs_f32() * 1000.0).to_bits(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
+
+/// `composite` runs in a later schedule than `dispatch_tiers`, so it hands its
+/// cost across through this cell rather than threading the timer resource
+/// through two systems.
+pub static COMPOSITE_MS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
 
 // ── OnExit ────────────────────────────────────────────────────────────────────
 

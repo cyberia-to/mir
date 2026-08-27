@@ -175,12 +175,16 @@ impl T3Pass {
         colors:         &crate::gpu::Buffer,
         camera:         &Camera,
         viewport:       [u32; 2],
-    ) -> Result<Vec<f32>, crate::gpu::GpuError> {
+        out_buf:        &crate::gpu::Buffer,
+    ) -> Result<(), crate::gpu::GpuError> {
         let [w, h] = viewport;
         let n = sorted_indices.len() as u32;
 
+        // Splats write every pixel, so this pass also clears the frame for
+        // the ones layered on top of it. With nothing to draw there is
+        // nothing to clear either — the caller allocated a zeroed buffer.
         if n == 0 {
-            return Ok(vec![0.0f32; (w * h * 4) as usize]);
+            return Ok(());
         }
 
         // Gather sorted compact buffers on CPU.
@@ -215,9 +219,6 @@ impl T3Pass {
         let col_buf = self.gpu.buffer_with_data(cast_f32(&col_data))?;
         let opa_buf = self.gpu.buffer_with_data(cast_f32(&opacity_data))?;
 
-        let pixel_count = (w * h) as usize;
-        let out_buf = self.gpu.buffer(pixel_count * 16)?;
-
         let camera_bytes: &[u8] = unsafe {
             std::slice::from_raw_parts(
                 camera as *const Camera as *const u8,
@@ -239,15 +240,13 @@ impl T3Pass {
         enc.push(camera_bytes,      4);
         enc.push(&n_bytes,          5);
         enc.push(&vp_bytes,         6);
-        enc.bind_buffer(&out_buf, 0, 7);
+        enc.bind_buffer(out_buf,  0, 7);
 
         enc.launch((w as usize, h as usize, 1), (16, 16, 1));
         enc.finish();
         cmd.submit();
         cmd.wait();
-
-        let pixels = out_buf.read_f32(|s| s.to_vec());
-        Ok(pixels)
+        Ok(())
     }
 }
 

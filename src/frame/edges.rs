@@ -291,7 +291,7 @@ impl EdgeLinePass {
     #[allow(clippy::too_many_arguments)]
     pub fn rasterize(
         &self,
-        pixels:    &mut Vec<f32>,
+        pixels:    &crate::gpu::Buffer,
         edge_list: &[(u32, u32)],
         pos_buf:   &crate::gpu::Buffer,
         weights:   &[f32],
@@ -304,7 +304,7 @@ impl EdgeLinePass {
 
         let [w, h] = viewport;
         let pixel_count = (w * h) as usize;
-        if pixels.len() < pixel_count * 4 { return Ok(()); }
+        if pixels.size() < pixel_count * 16 { return Ok(()); }
 
         // Pack edges as u32 pairs.
         let edge_data: Vec<u32> = edge_list[..n_edges].iter()
@@ -316,7 +316,6 @@ impl EdgeLinePass {
         let edge_buf   = self.gpu.buffer_with_data(cast_u8_u32(&edge_data))?;
         let w_buf      = self.gpu.buffer_with_data(cast_u8_f32(&weights[..n_edges]))?;
         let uv_buf     = self.gpu.buffer_with_data(cast_u8_f32(&flow_uvs[..n_edges]))?;
-        let px_buf     = self.gpu.buffer_with_data(cast_u8_f32(pixels))?;
 
         let vp_bytes: [u8; 64] = unsafe { std::mem::transmute(*view_proj) };
         let viewport_bytes: [u8; 8] = unsafe { std::mem::transmute([w, h]) };
@@ -329,7 +328,7 @@ impl EdgeLinePass {
         enc.bind_buffer(&edge_buf,   0, 1);
         enc.bind_buffer(&w_buf,      0, 2);
         enc.bind_buffer(&uv_buf,     0, 3);
-        enc.bind_buffer(&px_buf,     0, 4);
+        enc.bind_buffer(pixels,      0, 4);
         enc.push(&vp_bytes,             5);
         enc.push(&viewport_bytes,       6);
 
@@ -337,10 +336,6 @@ impl EdgeLinePass {
         enc.finish();
         cmd.submit();
         cmd.wait();
-
-        let result = px_buf.read_f32(|s| s.to_vec());
-        let copy_len = pixels.len().min(result.len());
-        pixels[..copy_len].copy_from_slice(&result[..copy_len]);
         Ok(())
     }
 }

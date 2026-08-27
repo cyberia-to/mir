@@ -28,8 +28,13 @@ pub fn update_camera(
 ) {
     let dt = time.delta_secs();
 
+    // Projection aspect follows the frame target, which mir sizes to the
+    // window's aspect — so this stays right while the target may be smaller.
     if let Ok(win) = windows.single() {
-        cam.viewport = [win.width(), win.height()];
+        let aspect_src = [win.width(), win.height()];
+        if cam.viewport != aspect_src {
+            cam.viewport = aspect_src;
+        }
     }
 
     // Advance warp animation (§9.2).

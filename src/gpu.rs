@@ -211,6 +211,14 @@ mod wgpu_arm {
             Ok(Queue { gpu: self.clone() })
         }
 
+        /// Block until everything submitted has finished. Submissions on one
+        /// queue execute in order, so passes can record and submit without
+        /// stalling individually — only the reader waits, once.
+        pub fn sync(&self, _queue: &Queue) -> Result<(), GpuError> {
+            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+            Ok(())
+        }
+
         fn storage_usage(&self) -> wgpu::BufferUsages {
             let mut usage = wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_SRC

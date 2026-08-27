@@ -20,13 +20,35 @@ pub enum GraphWorldState { #[default] Inactive, Active }
 
 // ── OnEnter ─────────────────────────────────────────────────────────────────
 
+/// Pixels the offscreen frame may cost. The graph is composited by compute
+/// shaders and read once per frame, so its price is linear in this number —
+/// it buys resolution directly out of the frame budget.
+const FRAME_PIXEL_BUDGET: f32 = 640_000.0;
+
+/// Offscreen size for a window: the window's own aspect (anything else
+/// stretches the graph, since the image is drawn full-screen) at no more than
+/// the budget.
+fn render_size(win_w: f32, win_h: f32) -> (u32, u32) {
+    let (win_w, win_h) = (win_w.max(1.0), win_h.max(1.0));
+    let scale = (FRAME_PIXEL_BUDGET / (win_w * win_h)).sqrt().min(1.0);
+    (
+        ((win_w * scale) as u32).max(64),
+        ((win_h * scale) as u32).max(64),
+    )
+}
+
 pub fn on_enter_graph(
     mut commands: Commands,
     mut images:   ResMut<Assets<Image>>,
     config:       Option<Res<GraphWorldConfig>>,
+    windows:      Query<&Window>,
 ) {
     info!("mir: entering graph world");
-    let w = 1280u32; let h = 720u32;
+    let (w, h) = windows
+        .single()
+        .map(|win| render_size(win.width(), win.height()))
+        .unwrap_or((1067, 600));
+    info!("mir: frame target {w}x{h}");
 
     // Create blank RGBA8 output image.
     let mut image = Image::new(
@@ -248,8 +270,11 @@ pub fn dispatch_tiers(
         }
     }
 
-    // The single readback of the frame.
+    // One sync for the whole chain, then the single readback.
     let t0 = std::time::Instant::now();
+    if let (Some(dev), Some(q)) = (&gpu.gpu, &gpu.sync_queue) {
+        let _ = dev.sync(q);
+    }
     let Some(fb) = &gpu.frame_buf else { return };
     let mut composite = fb.read_f32(|s| s.to_vec());
     timer.record(3, t0.elapsed().as_secs_f32() * 1000.0);

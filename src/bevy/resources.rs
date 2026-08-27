@@ -182,6 +182,10 @@ pub struct GpuBuffers {
     pub n_particles: usize,
     pub viewport:    [u32; 2],
     pub gpu:         Option<crate::gpu::Gpu>,
+    /// Queue the frame's single fence is taken on. Passes submit on their own
+    /// queues; all of them run on the same device, and this one orders the
+    /// readback behind them.
+    pub sync_queue:  Option<crate::gpu::Queue>,
     pub pos_buf:     Option<crate::gpu::Buffer>,
     pub rad_buf:     Option<crate::gpu::Buffer>,
     pub col_buf:     Option<crate::gpu::Buffer>,
@@ -214,7 +218,7 @@ impl Default for GpuBuffers {
     fn default() -> Self {
         Self {
             n_particles: 0, viewport: [1280, 720],
-            gpu: None, pos_buf: None, rad_buf: None, col_buf: None,
+            gpu: None, sync_queue: None, pos_buf: None, rad_buf: None, col_buf: None,
             bvh_buf: None, dummy_buf: None,
             cull: None, t2: None, t3: None, tinf: None, edge_line: None,
             edge: EdgePass::new(0),
@@ -234,8 +238,9 @@ impl GpuBuffers {
                 s.t3        = T3Pass::new()      .map_err(|e| warn!("mir: T3Pass init: {e}")).ok();
                 s.tinf      = TInfPass::new()    .map_err(|e| warn!("mir: TInfPass init: {e}")).ok();
                 s.edge_line = EdgeLinePass::new().map_err(|e| warn!("mir: EdgeLinePass init: {e}")).ok();
-                s.dummy_buf = gpu.buffer(4).ok();
-                s.gpu       = Some(gpu);
+                s.dummy_buf  = gpu.buffer(4).ok();
+                s.sync_queue = gpu.new_command_queue().ok();
+                s.gpu        = Some(gpu);
             }
             Err(e) => { warn!("mir: GPU init failed: {e}. Rendering disabled."); }
         }

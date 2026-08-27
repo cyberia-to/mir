@@ -276,8 +276,8 @@ impl T2Pass {
 
         enc.launch((w as usize, h as usize, 1), (16, 16, 1));
         enc.finish();
+        // No wait here: the frame's single sync point covers every pass.
         cmd.submit();
-        cmd.wait();
         Ok(())
     }
 }

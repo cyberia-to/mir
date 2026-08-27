@@ -70,7 +70,41 @@ mod wgpu_arm {
     /// pattern into a pinned block, wrap it, read it back through the GPU.
     /// On the zero-copy path the GPU is reading the block's own pages; on
     /// the fallback it reads the copy — either way the bytes must match.
+    /// One-shot inventory of the external-memory extensions this driver
+    /// offers versus what the device was actually created with — the two
+    /// facts that decide whether a zero-copy import is reachable at all.
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    fn report_external_memory(gpu: &Gpu) {
+        unsafe {
+            let Some(hal) = gpu.device.as_hal::<wgpu::hal::api::Vulkan>() else { return };
+            let enabled: Vec<&str> = hal
+                .enabled_device_extensions()
+                .iter()
+                .filter_map(|n| n.to_str().ok())
+                .filter(|n| n.contains("external_memory") || n.contains("external_fence"))
+                .collect();
+            let supported: Vec<String> = hal
+                .shared_instance()
+                .raw_instance()
+                .enumerate_device_extension_properties(hal.raw_physical_device())
+                .map(|props| {
+                    props
+                        .iter()
+                        .filter_map(|p| p.extension_name_as_c_str().ok()?.to_str().ok().map(String::from))
+                        .filter(|n| n.contains("external_memory"))
+                        .collect()
+                })
+                .unwrap_or_default();
+            log::info!("gpu: external-memory supported {supported:?}");
+            log::info!("gpu: external-memory enabled {enabled:?}");
+        }
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "linux")))]
+    fn report_external_memory(_gpu: &Gpu) {}
+
     fn verify_unimem_wrap(gpu: &Gpu) {
+        report_external_memory(gpu);
         let Ok(block) = unimem::Block::open(64 * 1024) else {
             log::warn!("gpu: unimem probe — block allocation failed");
             return;
@@ -78,16 +112,21 @@ mod wgpu_arm {
         for (i, w) in block.as_f32_mut().iter_mut().enumerate() {
             *w = i as f32;
         }
-        let zero_copy = gpu.import_host(&block).is_ok();
+        // The import path is the whole point of the probe: say plainly which
+        // one engaged, and when it did not, why — that reason is the only
+        // thing separating a zero-copy device from a copying one.
+        let how = match gpu.import_host(&block) {
+            Ok(_) => "zero-copy import".to_string(),
+            Err(why) => format!("copy fallback: {why}"),
+        };
         match gpu.wrap(&block) {
             Ok(buffer) => {
                 let ok = buffer.read_f32(|s| {
                     s.len() >= 3 && s[0] == 0.0 && s[1] == 1.0 && s[2] == 2.0
                 });
                 log::info!(
-                    "gpu: unimem wrap {} ({})",
+                    "gpu: unimem wrap {} ({how})",
                     if ok { "verified" } else { "MISMATCH" },
-                    if zero_copy { "zero-copy import" } else { "copy fallback" },
                 );
             }
             Err(e) => log::warn!("gpu: unimem probe — wrap failed: {e}"),
@@ -503,11 +542,15 @@ mod wgpu_arm {
         }
     }
 
-    /// Raw Vulkan backing of an imported unimem block.
+    /// The imported `VkDeviceMemory` behind a wrapped unimem block.
+    ///
+    /// Ownership is split: `Buffer::from_raw` leaves the memory to the caller
+    /// but wgpu still destroys the `VkBuffer` itself on drop, so this frees
+    /// the memory only — destroying the buffer here too is a double-free the
+    /// PowerVR driver answers with a SIGSEGV inside `vkDestroyBuffer`.
     struct HostImport {
         device: Arc<wgpu::Device>,
         memory: ash::vk::DeviceMemory,
-        raw: ash::vk::Buffer,
     }
 
     unsafe impl Send for HostImport {}
@@ -515,15 +558,13 @@ mod wgpu_arm {
 
     impl Drop for HostImport {
         fn drop(&mut self) {
-            // The wgpu buffer wrapping this memory is dropped first (field
-            // order in Buffer puts `raw` before `import`); wait out any
-            // in-flight GPU work before freeing what wgpu was pointing at.
+            // The wgpu buffer is dropped first (field order in Buffer puts
+            // `raw` before `import`); wait out in-flight GPU work before
+            // freeing the memory it was bound to.
             let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
             unsafe {
                 if let Some(hal) = self.device.as_hal::<wgpu::hal::api::Vulkan>() {
-                    let dev = hal.raw_device();
-                    dev.destroy_buffer(self.raw, None);
-                    dev.free_memory(self.memory, None);
+                    hal.raw_device().free_memory(self.memory, None);
                 }
             }
         }
@@ -557,8 +598,27 @@ mod wgpu_arm {
             Err("host import is vulkan-only".into())
         }
 
+        /// Zero-copy import, best available handle type first.
+        ///
+        /// Android's AHardwareBuffer is the platform IOSurface — gralloc
+        /// memory the CPU has locked and the GPU can bind. Desktop/embedded
+        /// Vulkan instead offers host-pointer import of an ordinary mmap.
+        /// A driver may have neither (PowerVR on the Pixel 10 has no
+        /// host-pointer import), which is what the copy fallback is for.
         #[cfg(any(target_os = "android", target_os = "linux"))]
         fn import_host(&self, block: &unimem::Block) -> Result<Buffer, String> {
+            #[cfg(target_os = "android")]
+            match self.import_ahardware(block) {
+                Ok(buffer) => return Ok(buffer),
+                Err(why) => {
+                    log::debug!("gpu: AHardwareBuffer import unavailable ({why})");
+                }
+            }
+            self.import_host_pointer(block)
+        }
+
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        fn import_host_pointer(&self, block: &unimem::Block) -> Result<Buffer, String> {
             use ash::vk;
 
             unsafe {
@@ -570,7 +630,26 @@ mod wgpu_arm {
                     .enabled_device_extensions()
                     .contains(&ash::ext::external_memory_host::NAME)
                 {
-                    return Err("VK_EXT_external_memory_host not enabled on device".into());
+                    // Separate "the driver cannot" from "we failed to ask":
+                    // the first is the end of the road on this device, the
+                    // second is a bug in the create-device callback.
+                    let supported = hal
+                        .shared_instance()
+                        .raw_instance()
+                        .enumerate_device_extension_properties(hal.raw_physical_device())
+                        .map(|props| {
+                            props.iter().any(|p| {
+                                p.extension_name_as_c_str()
+                                    .is_ok_and(|n| n == ash::ext::external_memory_host::NAME)
+                            })
+                        })
+                        .unwrap_or(false);
+                    return Err(if supported {
+                        "VK_EXT_external_memory_host supported but not enabled at device creation"
+                            .into()
+                    } else {
+                        "VK_EXT_external_memory_host unsupported by this driver".to_string()
+                    });
                 }
                 let dev = hal.raw_device();
                 let instance = hal.shared_instance().raw_instance();
@@ -674,11 +753,100 @@ mod wgpu_arm {
                     gpu: self.clone(),
                     raw: buffer,
                     size: block.size(),
-                    import: Some(HostImport {
-                        device: self.device.clone(),
-                        memory,
-                        raw: raw_buf,
-                    }),
+                    import: Some(HostImport { device: self.device.clone(), memory }),
+                })
+            }
+        }
+
+        #[cfg(target_os = "android")]
+        fn import_ahardware(&self, block: &unimem::Block) -> Result<Buffer, String> {
+            use ash::vk;
+
+            unsafe {
+                let hal = self
+                    .device
+                    .as_hal::<wgpu::hal::api::Vulkan>()
+                    .ok_or("backend is not vulkan")?;
+                let ext_name = ash::android::external_memory_android_hardware_buffer::NAME;
+                if !hal.enabled_device_extensions().contains(&ext_name) {
+                    return Err(format!("{} not enabled on device", ext_name.to_string_lossy()));
+                }
+                let dev = hal.raw_device();
+                let instance = hal.shared_instance().raw_instance();
+                let ahb = block.handle() as *mut vk::AHardwareBuffer;
+
+                let ext_fns =
+                    ash::android::external_memory_android_hardware_buffer::Device::new(instance, dev);
+                let mut props = vk::AndroidHardwareBufferPropertiesANDROID::default();
+                (ext_fns.fp().get_android_hardware_buffer_properties_android)(
+                    dev.handle(),
+                    ahb,
+                    &mut props,
+                )
+                .result()
+                .map_err(|e| format!("AHardwareBuffer properties: {e}"))?;
+
+                let mut ext_buf = vk::ExternalMemoryBufferCreateInfo::default()
+                    .handle_types(vk::ExternalMemoryHandleTypeFlags::ANDROID_HARDWARE_BUFFER_ANDROID);
+                let buf_info = vk::BufferCreateInfo::default()
+                    .size(block.alloc_size() as u64)
+                    .usage(
+                        vk::BufferUsageFlags::STORAGE_BUFFER
+                            | vk::BufferUsageFlags::TRANSFER_SRC
+                            | vk::BufferUsageFlags::TRANSFER_DST,
+                    )
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                    .push_next(&mut ext_buf);
+                let raw_buf = dev
+                    .create_buffer(&buf_info, None)
+                    .map_err(|e| format!("create_buffer: {e}"))?;
+
+                let req = dev.get_buffer_memory_requirements(raw_buf);
+                let type_bits = req.memory_type_bits & props.memory_type_bits;
+                let Some(index) = (0..32).find(|i| type_bits & (1 << i) != 0) else {
+                    dev.destroy_buffer(raw_buf, None);
+                    return Err("no importable memory type".into());
+                };
+
+                let mut dedicated = vk::MemoryDedicatedAllocateInfo::default().buffer(raw_buf);
+                let mut import_info =
+                    vk::ImportAndroidHardwareBufferInfoANDROID::default().buffer(ahb);
+                let alloc_info = vk::MemoryAllocateInfo::default()
+                    .allocation_size(props.allocation_size)
+                    .memory_type_index(index)
+                    .push_next(&mut import_info)
+                    .push_next(&mut dedicated);
+                let memory = match dev.allocate_memory(&alloc_info, None) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        dev.destroy_buffer(raw_buf, None);
+                        return Err(format!("allocate_memory(import AHB): {e}"));
+                    }
+                };
+                if let Err(e) = dev.bind_buffer_memory(raw_buf, memory, 0) {
+                    dev.destroy_buffer(raw_buf, None);
+                    dev.free_memory(memory, None);
+                    return Err(format!("bind_buffer_memory: {e}"));
+                }
+
+                let hal_buffer = wgpu::hal::vulkan::Buffer::from_raw(raw_buf);
+                let buffer = self.device.create_buffer_from_hal::<wgpu::hal::api::Vulkan>(
+                    hal_buffer,
+                    &wgpu::BufferDescriptor {
+                        label: Some("unimem-ahb"),
+                        size: block.alloc_size() as u64,
+                        usage: wgpu::BufferUsages::STORAGE
+                            | wgpu::BufferUsages::COPY_SRC
+                            | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    },
+                );
+
+                Ok(Buffer {
+                    gpu: self.clone(),
+                    raw: buffer,
+                    size: block.size(),
+                    import: Some(HostImport { device: self.device.clone(), memory }),
                 })
             }
         }

@@ -54,7 +54,9 @@ pub fn on_enter_graph(
     let mut image = Image::new(
         Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         TextureDimension::D2,
-        vec![20u8; (w * h * 4) as usize],
+        // Pure black until the first composite lands — a grey clear
+        // shows through as a grey background on the first frames.
+        vec![0u8; (w * h * 4) as usize],
         TextureFormat::Rgba8Unorm,
         RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
     );

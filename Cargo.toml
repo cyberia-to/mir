@@ -21,7 +21,6 @@ bevy      = { version = "0.18", optional = true }
 [target.'cfg(target_vendor = "apple")'.dependencies]
 aruminium = { path = "../honeycrisp/aruminium" }
 acpu      = { path = "../honeycrisp/acpu" }
-unimem    = { path = "../honeycrisp/unimem" }
 
 # The portable device layer (Vulkan / DX12 / GL). Same wgpu major as Bevy,
 # so cyb's binary carries one copy.
@@ -29,6 +28,13 @@ unimem    = { path = "../honeycrisp/unimem" }
 wgpu     = "27"
 pollster = "0.4"
 log      = "0.4"
+# portable now: IOSurface on Apple, memfd elsewhere
+unimem   = { path = "../honeycrisp/unimem" }
+
+# Raw Vulkan for the unimem host-pointer import (same ash wgpu-hal builds
+# against — the types must unify).
+[target.'cfg(any(target_os = "android", target_os = "linux"))'.dependencies]
+ash = "0.38"
 
 [dev-dependencies]
 tempfile = "3"

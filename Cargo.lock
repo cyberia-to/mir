@@ -3267,6 +3267,7 @@ version = "0.1.0"
 dependencies = [
  "acpu",
  "aruminium",
+ "ash",
  "bevy",
  "log",
  "memmap2",
@@ -4984,6 +4985,7 @@ name = "unimem"
 version = "0.2.0"
 dependencies = [
  "crossbeam-queue",
+ "libc",
  "mutants",
 ]
 

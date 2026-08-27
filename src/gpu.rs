@@ -51,6 +51,47 @@ mod wgpu_arm {
     pub struct Gpu {
         device: Arc<wgpu::Device>,
         queue: Arc<wgpu::Queue>,
+        /// MAPPABLE_PRIMARY_BUFFERS is live on this device: storage buffers
+        /// carry MAP_READ|MAP_WRITE and the closures below touch the
+        /// allocation directly — no staging buffer, no GPU copy. Bevy's own
+        /// device already has it on integrated GPUs (its Functionality
+        /// priority takes every adapter feature and only strips this one on
+        /// discrete cards, where the PCI-E round-trip would hurt).
+        mappable: bool,
+    }
+
+    fn probe(device: &wgpu::Device) -> bool {
+        let mappable = device.features().contains(wgpu::Features::MAPPABLE_PRIMARY_BUFFERS);
+        log::info!("gpu: direct-map {}", if mappable { "on" } else { "off (staging copies)" });
+        mappable
+    }
+
+    /// Prove the unimem→GPU seam on this device, once, out loud: write a
+    /// pattern into a pinned block, wrap it, read it back through the GPU.
+    /// On the zero-copy path the GPU is reading the block's own pages; on
+    /// the fallback it reads the copy — either way the bytes must match.
+    fn verify_unimem_wrap(gpu: &Gpu) {
+        let Ok(block) = unimem::Block::open(64 * 1024) else {
+            log::warn!("gpu: unimem probe — block allocation failed");
+            return;
+        };
+        for (i, w) in block.as_f32_mut().iter_mut().enumerate() {
+            *w = i as f32;
+        }
+        let zero_copy = gpu.import_host(&block).is_ok();
+        match gpu.wrap(&block) {
+            Ok(buffer) => {
+                let ok = buffer.read_f32(|s| {
+                    s.len() >= 3 && s[0] == 0.0 && s[1] == 1.0 && s[2] == 2.0
+                });
+                log::info!(
+                    "gpu: unimem wrap {} ({})",
+                    if ok { "verified" } else { "MISMATCH" },
+                    if zero_copy { "zero-copy import" } else { "copy fallback" },
+                );
+            }
+            Err(e) => log::warn!("gpu: unimem probe — wrap failed: {e}"),
+        }
     }
 
     static GLOBAL: std::sync::OnceLock<Result<Gpu, GpuError>> = std::sync::OnceLock::new();
@@ -60,9 +101,10 @@ mod wgpu_arm {
     /// wgpu ids: a second device sharing the GPU has produced driver-level
     /// hangs on PowerVR (Pixel 10) where MoltenVK tolerated it.
     pub fn install_shared(device: wgpu::Device, queue: wgpu::Queue) -> bool {
-        GLOBAL
-            .set(Ok(Gpu { device: Arc::new(device), queue: Arc::new(queue) }))
-            .is_ok()
+        let mappable = probe(&device);
+        let gpu = Gpu { device: Arc::new(device), queue: Arc::new(queue), mappable };
+        verify_unimem_wrap(&gpu);
+        GLOBAL.set(Ok(gpu)).is_ok()
     }
 
     impl Gpu {
@@ -81,11 +123,17 @@ mod wgpu_arm {
                         }),
                     )
                     .map_err(|_| GpuError::NoAdapter)?;
+                    let features = adapter.features()
+                        & wgpu::Features::MAPPABLE_PRIMARY_BUFFERS;
                     let (device, queue) = pollster::block_on(
-                        adapter.request_device(&wgpu::DeviceDescriptor::default()),
+                        adapter.request_device(&wgpu::DeviceDescriptor {
+                            required_features: features,
+                            ..Default::default()
+                        }),
                     )
                     .map_err(|e| GpuError::Device(e.to_string()))?;
-                    Ok(Gpu { device: Arc::new(device), queue: Arc::new(queue) })
+                    let mappable = probe(&device);
+                    Ok(Gpu { device: Arc::new(device), queue: Arc::new(queue), mappable })
                 })
                 .clone()
         }
@@ -124,27 +172,33 @@ mod wgpu_arm {
             Ok(Queue { gpu: self.clone() })
         }
 
+        fn storage_usage(&self) -> wgpu::BufferUsages {
+            let mut usage = wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST;
+            if self.mappable {
+                usage |= wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::MAP_WRITE;
+            }
+            usage
+        }
+
         pub fn buffer(&self, size: usize) -> Result<Buffer, GpuError> {
             let raw = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: None,
                 size: size.max(4) as u64,
-                usage: wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::COPY_SRC
-                    | wgpu::BufferUsages::COPY_DST,
+                usage: self.storage_usage(),
                 mapped_at_creation: false,
             });
-            Ok(Buffer { gpu: self.clone(), raw, size })
+            Ok(Buffer { gpu: self.clone(), raw, size, import: None })
         }
 
         pub fn buffer_with_data(&self, data: &[u8]) -> Result<Buffer, GpuError> {
             let raw = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,
                 contents: data,
-                usage: wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::COPY_SRC
-                    | wgpu::BufferUsages::COPY_DST,
+                usage: self.storage_usage(),
             });
-            Ok(Buffer { gpu: self.clone(), raw, size: data.len() })
+            Ok(Buffer { gpu: self.clone(), raw, size: data.len(), import: None })
         }
     }
 
@@ -299,9 +353,68 @@ mod wgpu_arm {
         gpu: Gpu,
         raw: wgpu::Buffer,
         size: usize,
+        /// Set when the storage is an imported unimem block: the CPU view
+        /// belongs to the block's owner, wgpu cannot map it, and the raw
+        /// Vulkan handles below outlive the wgpu buffer and are freed on
+        /// drop after a device wait.
+        import: Option<HostImport>,
     }
 
     impl Buffer {
+        /// Wait for the map callback: try_recv + poll in a loop. A single
+        /// poll(Wait) can return before the callback registers (seen on the
+        /// Pixel 10's PowerVR), and nothing else is guaranteed to poll this
+        /// device — the render thread may be parked in the pipelined-
+        /// rendering rendezvous.
+        fn pump_map(&self, rx: &std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>) {
+            loop {
+                match rx.try_recv() {
+                    Ok(_) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        let _ = self.gpu.device.poll(wgpu::PollType::wait_indefinitely());
+                    }
+                }
+            }
+        }
+
+        /// Map the buffer itself and run `f` over its bytes — the direct
+        /// path, zero staging. Caller contract (same as Metal shared
+        /// storage): no GPU work in flight on this buffer.
+        fn with_mapped_read<F, R>(&self, f: F) -> R
+        where
+            F: FnOnce(&[u8]) -> R,
+        {
+            let slice = self.raw.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r);
+            });
+            self.pump_map(&rx);
+            let r = f(&slice.get_mapped_range());
+            self.raw.unmap();
+            r
+        }
+
+        fn with_mapped_write<F, R>(&self, f: F) -> R
+        where
+            F: FnOnce(&mut [u8]) -> R,
+        {
+            let slice = self.raw.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Write, move |r| {
+                let _ = tx.send(r);
+            });
+            self.pump_map(&rx);
+            let r = {
+                let mut view = slice.get_mapped_range_mut();
+                f(&mut view)
+            };
+            self.raw.unmap();
+            r
+        }
+
+        /// The staging fallback for devices without MAPPABLE_PRIMARY_BUFFERS.
         fn readback(&self) -> Vec<u8> {
             let staging = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
                 label: None,
@@ -321,20 +434,7 @@ mod wgpu_arm {
             slice.map_async(wgpu::MapMode::Read, move |r| {
                 let _ = tx.send(r);
             });
-            // Poll in a loop: a single poll(Wait) can return before the map
-            // callback registered by map_async is delivered (seen on the
-            // Pixel 10's PowerVR), and nothing else is guaranteed to poll
-            // this device — the render thread may be parked in the pipelined-
-            // rendering rendezvous. Each poll drains pending map callbacks.
-            loop {
-                match rx.try_recv() {
-                    Ok(_) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        let _ = self.gpu.device.poll(wgpu::PollType::wait_indefinitely());
-                    }
-                }
-            }
+            self.pump_map(&rx);
             let data = slice.get_mapped_range().to_vec();
             staging.unmap();
             data
@@ -344,6 +444,9 @@ mod wgpu_arm {
         where
             F: FnOnce(&[u8]) -> R,
         {
+            if self.gpu.mappable && self.import.is_none() {
+                return self.with_mapped_read(|bytes| f(&bytes[..self.size.min(bytes.len())]));
+            }
             let data = self.readback();
             f(&data[..self.size.min(data.len())])
         }
@@ -352,6 +455,12 @@ mod wgpu_arm {
         where
             F: FnOnce(&mut [u8]) -> R,
         {
+            if self.gpu.mappable && self.import.is_none() {
+                return self.with_mapped_write(|bytes| {
+                    let len = self.size.min(bytes.len());
+                    f(&mut bytes[..len])
+                });
+            }
             let mut data = self.readback();
             let len = self.size.min(data.len());
             let r = f(&mut data[..len]);
@@ -363,37 +472,215 @@ mod wgpu_arm {
         where
             F: FnOnce(&[f32]) -> R,
         {
-            let data = self.readback();
-            let len = (self.size.min(data.len())) / 4;
-            let floats: Vec<f32> = data[..len * 4]
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect();
-            f(&floats)
+            self.read(|bytes| {
+                let len = bytes.len() / 4;
+                debug_assert_eq!(bytes.as_ptr() as usize % 4, 0, "mapped range under-aligned");
+                let floats =
+                    unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, len) };
+                f(floats)
+            })
         }
 
         pub fn write_f32<F, R>(&self, f: F) -> R
         where
             F: FnOnce(&mut [f32]) -> R,
         {
-            let data = self.readback();
-            let len = (self.size.min(data.len())) / 4;
-            let mut floats: Vec<f32> = data[..len * 4]
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect();
-            let r = f(&mut floats);
-            let bytes: Vec<u8> = floats.iter().flat_map(|v| v.to_le_bytes()).collect();
-            self.gpu.queue.write_buffer(&self.raw, 0, &bytes);
-            r
+            self.write(|bytes| {
+                let len = bytes.len() / 4;
+                debug_assert_eq!(bytes.as_ptr() as usize % 4, 0, "mapped range under-aligned");
+                let floats =
+                    unsafe { std::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut f32, len) };
+                f(floats)
+            })
         }
 
         pub fn as_bytes(&self) -> Vec<u8> {
-            self.readback()
+            self.read(|b| b.to_vec())
         }
 
         pub fn size(&self) -> usize {
             self.size
+        }
+    }
+
+    /// Raw Vulkan backing of an imported unimem block.
+    struct HostImport {
+        device: Arc<wgpu::Device>,
+        memory: ash::vk::DeviceMemory,
+        raw: ash::vk::Buffer,
+    }
+
+    unsafe impl Send for HostImport {}
+    unsafe impl Sync for HostImport {}
+
+    impl Drop for HostImport {
+        fn drop(&mut self) {
+            // The wgpu buffer wrapping this memory is dropped first (field
+            // order in Buffer puts `raw` before `import`); wait out any
+            // in-flight GPU work before freeing what wgpu was pointing at.
+            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+            unsafe {
+                if let Some(hal) = self.device.as_hal::<wgpu::hal::api::Vulkan>() {
+                    let dev = hal.raw_device();
+                    dev.destroy_buffer(self.raw, None);
+                    dev.free_memory(self.memory, None);
+                }
+            }
+        }
+    }
+
+    impl Gpu {
+        /// Wrap a pinned unimem block as a GPU buffer.
+        ///
+        /// The zero-copy path imports the block's pages into Vulkan via
+        /// `VK_EXT_external_memory_host` — the CPU view stays the block's
+        /// mmap, the GPU reads the same physical pages, and nothing is
+        /// copied. That needs the extension enabled at device creation
+        /// (cyb registers a bevy raw-vulkan callback for it); anywhere the
+        /// chain is missing this falls back to one copy of the block's
+        /// current contents, which is exactly what `buffer_with_data` does.
+        pub fn wrap(&self, block: &unimem::Block) -> Result<Buffer, GpuError> {
+            match self.import_host(block) {
+                Ok(buffer) => {
+                    log::debug!("gpu: wrap zero-copy ({} bytes)", block.size());
+                    Ok(buffer)
+                }
+                Err(why) => {
+                    log::debug!("gpu: wrap copies ({why})");
+                    self.buffer_with_data(block.as_bytes())
+                }
+            }
+        }
+
+        #[cfg(not(any(target_os = "android", target_os = "linux")))]
+        fn import_host(&self, _block: &unimem::Block) -> Result<Buffer, String> {
+            Err("host import is vulkan-only".into())
+        }
+
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        fn import_host(&self, block: &unimem::Block) -> Result<Buffer, String> {
+            use ash::vk;
+
+            unsafe {
+                let hal = self
+                    .device
+                    .as_hal::<wgpu::hal::api::Vulkan>()
+                    .ok_or("backend is not vulkan")?;
+                if !hal
+                    .enabled_device_extensions()
+                    .contains(&ash::ext::external_memory_host::NAME)
+                {
+                    return Err("VK_EXT_external_memory_host not enabled on device".into());
+                }
+                let dev = hal.raw_device();
+                let instance = hal.shared_instance().raw_instance();
+                let phys = hal.raw_physical_device();
+
+                // Host-pointer import wants minImportedHostPointerAlignment;
+                // the block's mmap is page-aligned, which satisfies the
+                // universal 4 KB and the 16 KB kernels alike.
+                let mut host_props = vk::PhysicalDeviceExternalMemoryHostPropertiesEXT::default();
+                let mut props2 =
+                    vk::PhysicalDeviceProperties2::default().push_next(&mut host_props);
+                instance.get_physical_device_properties2(phys, &mut props2);
+                let align = host_props.min_imported_host_pointer_alignment as usize;
+                let ptr = block.address() as *mut std::ffi::c_void;
+                if align == 0 || (ptr as usize) % align != 0 {
+                    return Err(format!("block not aligned to {align}"));
+                }
+                let import_size = block.alloc_size();
+                if import_size % align != 0 {
+                    return Err(format!("block allocation not a multiple of {align}"));
+                }
+
+                let ext_fns = ash::ext::external_memory_host::Device::new(instance, dev);
+                let mut ptr_props = vk::MemoryHostPointerPropertiesEXT::default();
+                (ext_fns.fp().get_memory_host_pointer_properties_ext)(
+                    dev.handle(),
+                    vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT,
+                    ptr,
+                    &mut ptr_props,
+                )
+                .result()
+                .map_err(|e| format!("host pointer properties: {e}"))?;
+
+                let mut ext_buf = vk::ExternalMemoryBufferCreateInfo::default()
+                    .handle_types(vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT);
+                let buf_info = vk::BufferCreateInfo::default()
+                    .size(import_size as u64)
+                    .usage(
+                        vk::BufferUsageFlags::STORAGE_BUFFER
+                            | vk::BufferUsageFlags::TRANSFER_SRC
+                            | vk::BufferUsageFlags::TRANSFER_DST,
+                    )
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                    .push_next(&mut ext_buf);
+                let raw_buf = dev
+                    .create_buffer(&buf_info, None)
+                    .map_err(|e| format!("create_buffer: {e}"))?;
+
+                let req = dev.get_buffer_memory_requirements(raw_buf);
+                let mem_props = instance.get_physical_device_memory_properties(phys);
+                let type_bits = req.memory_type_bits & ptr_props.memory_type_bits;
+                let wanted =
+                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+                let index = (0..mem_props.memory_type_count)
+                    .filter(|i| type_bits & (1 << i) != 0)
+                    .find(|i| {
+                        mem_props.memory_types[*i as usize]
+                            .property_flags
+                            .contains(wanted)
+                    })
+                    .or_else(|| (0..mem_props.memory_type_count).find(|i| type_bits & (1 << i) != 0));
+                let Some(index) = index else {
+                    dev.destroy_buffer(raw_buf, None);
+                    return Err("no importable memory type".into());
+                };
+
+                let mut import_info = vk::ImportMemoryHostPointerInfoEXT::default()
+                    .handle_type(vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT)
+                    .host_pointer(ptr);
+                let alloc_info = vk::MemoryAllocateInfo::default()
+                    .allocation_size(import_size as u64)
+                    .memory_type_index(index)
+                    .push_next(&mut import_info);
+                let memory = match dev.allocate_memory(&alloc_info, None) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        dev.destroy_buffer(raw_buf, None);
+                        return Err(format!("allocate_memory(import): {e}"));
+                    }
+                };
+                if let Err(e) = dev.bind_buffer_memory(raw_buf, memory, 0) {
+                    dev.destroy_buffer(raw_buf, None);
+                    dev.free_memory(memory, None);
+                    return Err(format!("bind_buffer_memory: {e}"));
+                }
+
+                let hal_buffer = wgpu::hal::vulkan::Buffer::from_raw(raw_buf);
+                let buffer = self.device.create_buffer_from_hal::<wgpu::hal::api::Vulkan>(
+                    hal_buffer,
+                    &wgpu::BufferDescriptor {
+                        label: Some("unimem-import"),
+                        size: import_size as u64,
+                        usage: wgpu::BufferUsages::STORAGE
+                            | wgpu::BufferUsages::COPY_SRC
+                            | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    },
+                );
+
+                Ok(Buffer {
+                    gpu: self.clone(),
+                    raw: buffer,
+                    size: block.size(),
+                    import: Some(HostImport {
+                        device: self.device.clone(),
+                        memory,
+                        raw: raw_buf,
+                    }),
+                })
+            }
         }
     }
 }

@@ -4,11 +4,9 @@ use std::sync::{Arc, RwLock};
 use bevy::prelude::*;
 
 use crate::epoch::EpochState;
-use crate::frame::composite::PackPass;
 use crate::frame::cull::CullPass;
-use crate::frame::tiers::t2::T2Pass;
-use crate::frame::tiers::t3::T3Pass;
-use crate::frame::edges::{EdgePass, EdgeLinePass};
+use crate::frame::edges::EdgePass;
+use crate::frame::paint::PaintPass;
 use crate::graph::Csr;
 
 #[derive(Resource)]
@@ -192,11 +190,8 @@ pub struct GpuBuffers {
     pub bvh_buf:     Option<crate::gpu::Buffer>,  // BvhNode array for cull pass
     pub dummy_buf:   Option<crate::gpu::Buffer>,  // fallback when BVH not ready
     pub cull:        Option<CullPass>,
-    pub t2:          Option<T2Pass>,
-    pub t3:          Option<T3Pass>,
     pub edge:        EdgePass,
-    pub edge_line:   Option<EdgeLinePass>,
-    pub pack:        Option<PackPass>,
+    pub paint:       Option<PaintPass>,
     pub focus:       Vec<f32>,
     pub csr:         Option<Arc<Csr>>,
     pub d_inv:       Vec<f32>,
@@ -213,11 +208,9 @@ pub struct GpuBuffers {
     pub sorted:      Vec<u32>,
     pub edge_list:   Vec<(u32, u32)>,
     pub edge_weights: Vec<f32>,
-    /// The frame buffer every pass composites into — allocated once, reused.
-    /// Keeping it on the GPU is what makes the chain one readback instead of
-    /// four full-frame transfers.
-    pub frame_buf:   Option<crate::gpu::Buffer>,
-    /// Packed RGBA8 output of the pack kernel — the only buffer the CPU maps.
+    /// Screen-space edge glow segments (8 f32 each), camera-gated cache.
+    pub segments:    Vec<f32>,
+    /// Packed RGBA8 output of the paint kernel — the only buffer the CPU maps.
     pub frame_u8:    Option<crate::gpu::Buffer>,
     pub reader:      crate::gpu::FrameReader,
     pub last_pixels: Option<Vec<u8>>,  // RGBA8, W×H×4
@@ -235,14 +228,14 @@ impl Default for GpuBuffers {
             n_particles: 0, viewport: [1280, 720],
             gpu: None, sync_queue: None, pos_buf: None, rad_buf: None, col_buf: None,
             bvh_buf: None, dummy_buf: None,
-            cull: None, t2: None, t3: None, edge_line: None, pack: None,
+            cull: None, paint: None,
             edge: EdgePass::new(0),
             focus: Vec::new(), csr: None, d_inv: Vec::new(),
             visible: Vec::new(),
             pos_cpu: Vec::new(), rad_cpu: Vec::new(), col_cpu: Vec::new(),
             cached_vp: None, sorted: Vec::new(),
-            edge_list: Vec::new(), edge_weights: Vec::new(),
-            frame_buf: None, frame_u8: None,
+            edge_list: Vec::new(), edge_weights: Vec::new(), segments: Vec::new(),
+            frame_u8: None,
             reader: crate::gpu::FrameReader::new(),
             last_pixels: None, output_image: None,
         }
@@ -254,11 +247,8 @@ impl GpuBuffers {
         let mut s = Self::default();
         match crate::gpu::Gpu::open() {
             Ok(gpu) => {
-                s.cull      = CullPass::new()    .map_err(|e| warn!("mir: CullPass init: {e}")).ok();
-                s.t2        = T2Pass::new()      .map_err(|e| warn!("mir: T2Pass init: {e}")).ok();
-                s.t3        = T3Pass::new()      .map_err(|e| warn!("mir: T3Pass init: {e}")).ok();
-                s.edge_line = EdgeLinePass::new().map_err(|e| warn!("mir: EdgeLinePass init: {e}")).ok();
-                s.pack      = PackPass::new()    .map_err(|e| warn!("mir: PackPass init: {e}")).ok();
+                s.cull  = CullPass::new() .map_err(|e| warn!("mir: CullPass init: {e}")).ok();
+                s.paint = PaintPass::new().map_err(|e| warn!("mir: PaintPass init: {e}")).ok();
                 s.dummy_buf  = gpu.buffer(4).ok();
                 s.sync_queue = gpu.new_command_queue().ok();
                 s.gpu        = Some(gpu);

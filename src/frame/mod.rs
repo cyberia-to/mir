@@ -6,5 +6,4 @@
 pub mod cull;
 pub mod diffusion;
 pub mod edges;
-pub mod composite;
-pub mod tiers;
+pub mod paint;

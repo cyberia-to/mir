@@ -6,7 +6,6 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 
 use crate::epoch::EpochWorker;
-use crate::frame::cull::TierLevel;
 use crate::frame::diffusion::diffusion_step;
 
 use super::resources::{EpochStateRes, GpuBuffers, GraphCamera, GraphWorldConfig, WarpTarget};
@@ -155,7 +154,7 @@ pub fn sync_visible_entities(mut gpu: ResMut<GpuBuffers>, cam: Res<GraphCamera>)
         }
     } else { return };
 
-    gpu.sorted = crate::frame::tiers::t3::sort_by_depth(&visible, &gpu.pos_cpu, &camera);
+    gpu.sorted = crate::frame::paint::sort_by_depth(&visible, &gpu.pos_cpu, &camera);
 
     // Edges between visible particles, undirected, deduped by (min,max).
     let vis_set: std::collections::HashSet<u32> =
@@ -173,6 +172,8 @@ pub fn sync_visible_entities(mut gpu: ResMut<GpuBuffers>, cam: Res<GraphCamera>)
         }
     }
     debug!("mir: cull -> {} visible, {} edges", visible.len(), edge_list.len());
+    gpu.segments = crate::frame::paint::edge_segments(
+        &edge_list, &weights, &gpu.pos_cpu, &camera, gpu.viewport);
     gpu.edge_list = edge_list;
     gpu.edge_weights = weights;
     gpu.visible = visible;
@@ -194,66 +195,26 @@ pub fn dispatch_tiers(
     let [w, h] = gpu.viewport;
     let pixel_count = (w as usize) * (h as usize);
 
-    // One frame buffer for the whole chain: splats clear and fill it, sphere
-    // impostors composite over it, edges blend into it, pack quantizes it —
-    // and the CPU maps only the packed quarter-size result, once.
-    if gpu.frame_buf.as_ref().map(|b| b.size()) != Some(pixel_count * 16) {
+    // The frame is one packed RGBA8 buffer, written by the single paint
+    // dispatch and mapped (asynchronously) by the reader — nothing else.
+    if gpu.frame_u8.as_ref().map(|b| b.size()) != Some(pixel_count * 4) {
         let Some(dev) = &gpu.gpu else { return };
-        match (dev.buffer(pixel_count * 16), dev.buffer(pixel_count * 4)) {
-            (Ok(b), Ok(b8)) => { gpu.frame_buf = Some(b); gpu.frame_u8 = Some(b8); }
-            (Err(e), _) | (_, Err(e)) => { warn!("mir: frame buffer: {e}"); return }
+        match dev.buffer(pixel_count * 4) {
+            Ok(b8) => gpu.frame_u8 = Some(b8),
+            Err(e) => { warn!("mir: frame buffer: {e}"); return }
         }
     }
 
-    // One command buffer for the whole chain — every pass encodes into it
-    // and the queue sees a single submission per frame.
+    // One kernel, one command buffer, one submission per frame.
     let Some(cmd) = gpu.sync_queue.as_ref().and_then(|q| q.commands().ok()) else { return };
-
-    // T3 Gaussian splats (back-to-front, order cached until the camera moves).
-    if let (Some(t3), Some(fb)) = (&gpu.t3, &gpu.frame_buf) {
-        if !gpu.sorted.is_empty() {
-            trace_step("t3.draw");
-            let t0 = std::time::Instant::now();
-            let drawn = t3.draw(&gpu.sorted, &gpu.pos_cpu, &gpu.rad_cpu, &gpu.col_cpu,
-                                &camera, [w, h], fb, &cmd);
-            timer.record(0, t0.elapsed().as_secs_f32() * 1000.0);
-            if let Err(e) = drawn { warn!("T3: {e}"); }
-        }
-    }
-
-    // T2 sphere impostors — composited over T3 inside the shader.
-    if let (Some(t2), Some(fb)) = (&gpu.t2, &gpu.frame_buf) {
-        if gpu.visible.iter().any(|(_, t)| *t == TierLevel::T2) {
-            trace_step("t2.draw");
-            let t0 = std::time::Instant::now();
-            let drawn = t2.draw(&gpu.visible, &gpu.pos_cpu, &gpu.rad_cpu, &gpu.col_cpu,
-                                &camera, [w, h], fb, &cmd);
-            timer.record(1, t0.elapsed().as_secs_f32() * 1000.0);
-            if let Err(e) = drawn { warn!("T2: {e}"); }
-        }
-    }
-
-    // §8 Edge rasterization over the cached visible-edge set.
-    if let (Some(el), Some(pb), Some(fb)) = (&gpu.edge_line, &gpu.pos_buf, &gpu.frame_buf) {
-        if !gpu.edge_list.is_empty() {
-            let flow_offs = gpu.edge.flow_offsets();
-            let flow_uvs: Vec<f32> = (0..gpu.edge_list.len())
-                .map(|i| flow_offs.get(i).copied().unwrap_or(0.0))
-                .collect();
-            trace_step("edges");
-            let t0 = std::time::Instant::now();
-            let _ = el.rasterize(fb, &gpu.edge_list, pb, &gpu.edge_weights,
-                                 &flow_uvs, &cam.view_proj(), [w, h], &cmd);
-            timer.record(2, t0.elapsed().as_secs_f32() * 1000.0);
-        }
-    }
-
-    // Pack to RGBA8 on the GPU (background fill included), then fetch —
-    // async on the readback arms: this frame shows the previous frame's
-    // pixels and the CPU never waits for the GPU.
-    if let (Some(pack), Some(fb), Some(f8)) = (&gpu.pack, &gpu.frame_buf, &gpu.frame_u8) {
-        trace_step("pack");
-        if let Err(e) = pack.run(fb, f8, pixel_count as u32, &cmd) { warn!("pack: {e}"); }
+    if let (Some(paint), Some(f8)) = (&gpu.paint, &gpu.frame_u8) {
+        trace_step("paint");
+        let t0 = std::time::Instant::now();
+        let drawn = paint.draw(&gpu.sorted, &gpu.visible,
+                               &gpu.pos_cpu, &gpu.rad_cpu, &gpu.col_cpu,
+                               &gpu.segments, &camera, [w, h], f8, &cmd);
+        timer.record(0, t0.elapsed().as_secs_f32() * 1000.0);
+        if let Err(e) = drawn { warn!("paint: {e}"); }
     }
     cmd.submit();
     let t0 = std::time::Instant::now();
@@ -265,9 +226,9 @@ pub fn dispatch_tiers(
             g.reader.fetch(dev, q, f8, &mut pixels);
         }
     }
-    timer.record(3, t0.elapsed().as_secs_f32() * 1000.0);
+    timer.record(1, t0.elapsed().as_secs_f32() * 1000.0);
     timer.record(
-        4,
+        2,
         f32::from_bits(COMPOSITE_MS.load(std::sync::atomic::Ordering::Relaxed)),
     );
 
@@ -281,13 +242,12 @@ pub fn dispatch_tiers(
 #[derive(Default)]
 pub struct PassTimer {
     frames: u32,
-    total:  [f32; 5],
+    total:  [f32; 3],
     since:  f32,
 }
 
 impl PassTimer {
-    const NAMES: [&'static str; 5] =
-        ["t3", "t2", "edges", "readback", "toimage"];
+    const NAMES: [&'static str; 3] = ["paint", "readback", "toimage"];
 
     fn record(&mut self, slot: usize, ms: f32) {
         self.total[slot] += ms;

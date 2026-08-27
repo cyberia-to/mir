@@ -13,7 +13,9 @@
 pub use aruminium::{Buffer, Commands, Encoder, Gpu, GpuError, Pipeline, Queue, Shader, ShaderLib};
 
 #[cfg(not(target_vendor = "apple"))]
-pub use wgpu_arm::{Buffer, Commands, Encoder, Gpu, GpuError, Pipeline, Queue, Shader, ShaderLib};
+pub use wgpu_arm::{
+    Buffer, Commands, Encoder, Gpu, GpuError, Pipeline, Queue, Shader, ShaderLib, install_shared,
+};
 
 #[cfg(not(target_vendor = "apple"))]
 mod wgpu_arm {
@@ -51,13 +53,24 @@ mod wgpu_arm {
         queue: Arc<wgpu::Queue>,
     }
 
+    static GLOBAL: std::sync::OnceLock<Result<Gpu, GpuError>> = std::sync::OnceLock::new();
+
+    /// Hand the facade an existing device (e.g. Bevy's render device) before
+    /// the first `Gpu::open()`. One `VkDevice` per process is not just about
+    /// wgpu ids: a second device sharing the GPU has produced driver-level
+    /// hangs on PowerVR (Pixel 10) where MoltenVK tolerated it.
+    pub fn install_shared(device: wgpu::Device, queue: wgpu::Queue) -> bool {
+        GLOBAL
+            .set(Ok(Gpu { device: Arc::new(device), queue: Arc::new(queue) }))
+            .is_ok()
+    }
+
     impl Gpu {
         /// One device per process, like Metal's system default device: every
         /// pass calls `open()` and they must all land on the same `Device`,
         /// or buffers from one pass cannot bind into another's pipeline
         /// (wgpu-core panics on the cross-hub id).
         pub fn open() -> Result<Self, GpuError> {
-            static GLOBAL: std::sync::OnceLock<Result<Gpu, GpuError>> = std::sync::OnceLock::new();
             GLOBAL
                 .get_or_init(|| {
                     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
@@ -308,8 +321,20 @@ mod wgpu_arm {
             slice.map_async(wgpu::MapMode::Read, move |r| {
                 let _ = tx.send(r);
             });
-            let _ = self.gpu.device.poll(wgpu::PollType::wait_indefinitely());
-            let _ = rx.recv();
+            // Poll in a loop: a single poll(Wait) can return before the map
+            // callback registered by map_async is delivered (seen on the
+            // Pixel 10's PowerVR), and nothing else is guaranteed to poll
+            // this device — the render thread may be parked in the pipelined-
+            // rendering rendezvous. Each poll drains pending map callbacks.
+            loop {
+                match rx.try_recv() {
+                    Ok(_) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        let _ = self.gpu.device.poll(wgpu::PollType::wait_indefinitely());
+                    }
+                }
+            }
             let data = slice.get_mapped_range().to_vec();
             staging.unmap();
             data

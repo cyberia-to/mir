@@ -138,6 +138,14 @@ pub fn sync_visible_entities(
     for &(idx, tier) in &visible {
         commands.spawn((VisibleParticle(idx), CompTier(tier as u8)));
     }
+    {
+        static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if gpu.visible.len() != visible.len()
+            || !ONCE.swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            debug!("mir: cull -> {} visible of {}", visible.len(), gpu.n_particles);
+        }
+    }
     gpu.visible = visible;
 }
 
@@ -152,10 +160,12 @@ pub fn dispatch_tiers(
     let [w, h] = gpu.viewport;
 
     // Read positions for CPU depth sort.
+    trace_step("read positions");
     let positions: Vec<f32> = match &gpu.pos_buf {
         Some(b) => b.read_f32(|s| s.to_vec()),
         None => return,
     };
+    trace_step("positions ok");
 
     let mut composite = vec![0.0f32; (w as usize) * (h as usize) * 4];
 
@@ -166,6 +176,7 @@ pub fn dispatch_tiers(
         use crate::frame::tiers::t3::sort_by_depth;
         let sorted = sort_by_depth(&gpu.visible, &positions, &camera);
         if !sorted.is_empty() {
+            trace_step("t3.draw");
             match t3.draw(&sorted, pb, rb, cb, &camera, [w, h]) {
                 Ok(pixels) => {
                     let copy_len = composite.len().min(pixels.len());
@@ -181,6 +192,7 @@ pub fn dispatch_tiers(
         (&gpu.t2, &gpu.pos_buf, &gpu.rad_buf, &gpu.col_buf)
     {
         if gpu.visible.iter().any(|(_, t)| *t == TierLevel::T2) {
+            trace_step("t2.draw");
             match t2.draw(&gpu.visible, pb, rb, cb, &camera, [w, h]) {
                 Ok(pixels) => {
                     // Alpha-composite T2 over T3: T2 pixel alpha in .w component.
@@ -229,6 +241,7 @@ pub fn dispatch_tiers(
             .collect();
 
         let vp = cam.view_proj();
+        trace_step("edges");
         if !edge_list.is_empty() {
             let _ = el.rasterize(
                 &mut composite,
@@ -249,9 +262,25 @@ pub fn dispatch_tiers(
         }
     }
 
+    {
+        let lit = composite.chunks(4).filter(|c| c[0] + c[1] + c[2] > 0.01).count();
+        debug!("mir: composite {} lit pixels", lit);
+    }
     gpu.last_pixels = Some(composite);
 }
 
+
+/// One-shot step tracer for bringing the pipeline up on a new driver.
+fn trace_step(step: &str) {
+    use std::sync::Mutex;
+    static SEEN: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    let mut seen = SEEN.lock().unwrap();
+    if !seen.iter().any(|s| *s == step) {
+        // leak is bounded: a handful of static step names
+        seen.push(Box::leak(step.to_string().into_boxed_str()));
+        debug!("mir: step {step}");
+    }
+}
 
 pub fn animate_edges(mut gpu: ResMut<GpuBuffers>, time: Res<Time>) {
     let n = gpu.edge.flow_offsets().len();

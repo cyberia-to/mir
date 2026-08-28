@@ -29,6 +29,11 @@ pub enum GraphWorldState { #[default] Inactive, Active }
 /// tier and the graph loses its spheres before it loses its sharpness.
 const FRAME_PIXEL_BUDGET: f32 = 4_200_000.0;
 
+/// Frames to skip after the window's geometry moves. Three is enough for the
+/// surface to be reconfigured and the swapchain rebuilt; at 50 fps it is not
+/// something an eye can catch.
+const SETTLE_FRAMES: u32 = 3;
+
 /// Offscreen size for a window: the window's own aspect (anything else
 /// stretches the graph, since the image is drawn full-screen) at no more than
 /// the budget.
@@ -111,6 +116,7 @@ pub fn on_enter_graph(
 
     let mut gpu = GpuBuffers::new();
     gpu.viewport = [w, h];
+    gpu.settle = SETTLE_FRAMES;
     gpu.output_image = Some(img_handle);
 
     let epoch_arc: Arc<RwLock<Option<crate::epoch::EpochState>>> =
@@ -240,6 +246,10 @@ pub fn dispatch_tiers(
 ) {
     let dt = time.delta_secs();
     timer.frame(dt);
+    if gpu.settle > 0 {
+        gpu.settle -= 1;
+        return;
+    }
     if gpu.visible.is_empty() { return }
     let camera = cam.to_gpu_camera();
     let [w, h] = gpu.viewport;
@@ -308,6 +318,7 @@ pub fn publish_frame(
     gpu:     Res<GpuBuffers>,
     handoff: Res<crate::bevy::blit::FrameHandoff>,
 ) {
+    if gpu.settle > 0 { return }
     let (Some(buf), Some(handle)) = (&gpu.frame_u8, &gpu.output_image) else { return };
     let [w, h] = gpu.viewport;
     handoff.publish(crate::bevy::blit::FrameCopy {
@@ -409,6 +420,7 @@ pub fn track_frame_size(
     };
     image.data = Some(vec![0u8; (w as usize) * (h as usize) * 4]);
     gpu.viewport = [w, h];
+    gpu.settle = SETTLE_FRAMES;
     info!("mir: frame target {w}x{h}");
 }
 

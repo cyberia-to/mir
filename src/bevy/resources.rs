@@ -201,6 +201,15 @@ pub struct WarpAnim {
 pub struct GpuBuffers {
     pub n_particles: usize,
     pub viewport:    [u32; 2],
+    /// Frames to sit out before submitting GPU work again.
+    ///
+    /// Reconfiguring a surface makes wgpu wait for the device to go idle, and
+    /// on this driver that wait fails outright rather than blocking — the
+    /// process dies with "Failed to wait for GPU to come idle". Window
+    /// geometry changes at startup and on every rotation, which is exactly
+    /// when mir would otherwise be submitting a paint and a blit per frame.
+    /// Standing down for a few frames costs a few frames.
+    pub settle:      u32,
     pub gpu:         Option<crate::gpu::Gpu>,
     /// Queue the frame's single fence is taken on. Passes submit on their own
     /// queues; all of them run on the same device, and this one orders the
@@ -248,6 +257,7 @@ impl Default for GpuBuffers {
     fn default() -> Self {
         Self {
             n_particles: 0, viewport: [1280, 720],
+            settle: 0,
             gpu: None, sync_queue: None, pos_buf: None, rad_buf: None, col_buf: None,
             bvh_buf: None, dummy_buf: None,
             cull: None, paint: None,

@@ -43,6 +43,67 @@ pub struct Camera {
     pub cam_fwd:   [f32; 4],
 }
 
+/// The same cull, on the CPU.
+///
+/// The GPU pass ends in a full device sync to read its results back, and that
+/// sync only happens on frames where the camera moved — which is exactly when
+/// smoothness is being judged. Measured on a Pixel: still, the frame sits at a
+/// median of 18.8 ms; dragging, it goes to 27.8 with a p90 of 39.4, while the
+/// paint dispatch stays at 1.2 ms. The graph does not get harder to draw when
+/// you touch it; it gets harder to *decide* what to draw, because deciding
+/// costs a round trip.
+///
+/// A linear scan over a few thousand particles is far below that round trip,
+/// so below [`CPU_CULL_MAX`] this runs instead. It also returns particles in
+/// index order, where the kernel returns them in whatever order its atomic
+/// counter handed out.
+///
+/// This is a second implementation of the tier rules, which is a real cost —
+/// `cpu_and_gpu_cull_agree` exists to keep it honest.
+pub fn cull_cpu(positions: &[f32], radii: &[f32], camera: &Camera, n: u32) -> VisibleSet {
+    let mut entries = Vec::with_capacity(n as usize);
+    for i in 0..n as usize {
+        let (x, y, z) = (positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
+        let r = radii[i];
+
+        // The sphere's AABB against each frustum plane, testing the corner
+        // that maximises the plane's normal — outside any one plane culls.
+        let outside = camera.planes.iter().any(|pl| {
+            let px = if pl[0] >= 0.0 { x + r } else { x - r };
+            let py = if pl[1] >= 0.0 { y + r } else { y - r };
+            let pz = if pl[2] >= 0.0 { z + r } else { z - r };
+            pl[0] * px + pl[1] * py + pl[2] * pz + pl[3] < 0.0
+        });
+        if outside {
+            continue;
+        }
+
+        let m = &camera.view_proj;
+        let clip_w = m[0][3] * x + m[1][3] * y + m[2][3] * z + m[3][3];
+        let diam = if clip_w <= 0.0 {
+            0.0
+        } else {
+            r * camera.cam_up[3] / clip_w * camera.viewport[1]
+        };
+        entries.push((i as u32, diameter_to_tier(diam)));
+    }
+    VisibleSet { entries }
+}
+
+/// Screen diameter in pixels to tier, matching `diameter_to_tier` in both
+/// kernels. Kept beside the thresholds it reads so the three cannot drift
+/// without it being obvious.
+pub fn diameter_to_tier(diam: f32) -> TierLevel {
+    if diam >= S_T0 { TierLevel::T0 }
+    else if diam >= S_T1 { TierLevel::T1 }
+    else if diam >= S_T2 { TierLevel::T2 }
+    else if diam >= S_T3 { TierLevel::T3 }
+    else { TierLevel::TInf }
+}
+
+/// Above this many particles the GPU pass earns its round trip back.
+pub const CPU_CULL_MAX: u32 = 100_000;
+
 /// GPU BVH frustum-cull + tier-assignment pass.
 #[allow(dead_code)]
 pub struct CullPass {

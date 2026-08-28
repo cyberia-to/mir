@@ -164,7 +164,10 @@ pub fn sync_visible_entities(mut gpu: ResMut<GpuBuffers>, cam: Res<GraphCamera>)
     let camera = cam.to_gpu_camera();
     if gpu.cached_vp == Some(camera.view_proj) { return }
 
-    let visible = if let (Some(cull), Some(pb), Some(rb)) =
+    let n = gpu.n_particles as u32;
+    let visible = if n <= crate::frame::cull::CPU_CULL_MAX {
+        crate::frame::cull::cull_cpu(&gpu.pos_cpu, &gpu.rad_cpu, &camera, n).entries
+    } else if let (Some(cull), Some(pb), Some(rb)) =
         (&gpu.cull, &gpu.pos_buf, &gpu.rad_buf)
     {
         let bvh_ref = gpu.bvh_buf.as_ref().or(gpu.dummy_buf.as_ref());
@@ -324,6 +327,10 @@ pub struct PassTimer {
     frames: u32,
     total:  [f32; 3],
     since:  f32,
+    /// Every frame's duration this second. Smoothness is not the average — a
+    /// steady 20 ms and an alternating 10/30 ms are the same mean and only one
+    /// of them looks like motion.
+    dts:    Vec<f32>,
 }
 
 impl PassTimer {
@@ -336,6 +343,7 @@ impl PassTimer {
     fn frame(&mut self, dt: f32) {
         self.frames += 1;
         self.since += dt;
+        self.dts.push(dt * 1000.0);
         if self.since < 1.0 {
             return;
         }
@@ -345,7 +353,18 @@ impl PassTimer {
             .zip(self.total.iter())
             .map(|(n, t)| format!("{n} {:.1}ms", t / f))
             .collect();
-        info!("mir: {:.1} fps — {}", f / self.since, parts.join(", "));
+
+        self.dts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let at = |q: f32| -> f32 {
+            let i = ((self.dts.len() as f32 - 1.0) * q).round() as usize;
+            self.dts.get(i).copied().unwrap_or(0.0)
+        };
+        info!(
+            "mir: {:.1} fps — {} | frame p50 {:.1} p90 {:.1} max {:.1} ms",
+            f / self.since,
+            parts.join(", "),
+            at(0.5), at(0.9), at(1.0),
+        );
         *self = Self::default();
     }
 }

@@ -175,14 +175,28 @@ pub fn sync_visible_entities(mut gpu: ResMut<GpuBuffers>, cam: Res<GraphCamera>)
         }
     } else { return };
 
+    // The cull kernel appends through an atomic counter, so the order it
+    // returns particles in is whatever the GPU's scheduling happened to be
+    // that frame. Everything downstream composites with alpha, where order
+    // is visible: put it back in a fixed one.
+    let mut visible = visible;
+    visible.sort_unstable_by_key(|&(idx, _)| idx);
+
     gpu.sorted = crate::frame::paint::sort_by_depth(&visible, &gpu.pos_cpu, &camera);
 
     // Edges between visible particles, undirected, deduped by (min,max).
+    //
+    // Walk `visible`, not the set: a HashSet's iteration order depends on the
+    // hash key its instance was built with, and a fresh one is built here
+    // every frame, so the same particles came out in a different order each
+    // time. Edges are composited with alpha, so a different order is a
+    // different image — the graph flickered wherever links crossed, and only
+    // while the camera moved, since a still camera never reaches this code.
     let vis_set: std::collections::HashSet<u32> =
         visible.iter().map(|&(idx, _)| idx).collect();
     let (mut edge_list, mut weights) = (Vec::new(), Vec::new());
     if let Some(csr) = &gpu.csr {
-        for &p in &vis_set {
+        for &(p, _) in &visible {
             let (cols, vals) = csr.row(p as usize);
             for (&q, &w) in cols.iter().zip(vals.iter()) {
                 if q > p && vis_set.contains(&q) {
@@ -192,6 +206,18 @@ pub fn sync_visible_entities(mut gpu: ResMut<GpuBuffers>, cam: Res<GraphCamera>)
             }
         }
     }
+    // And the edges go in a fixed order too, rather than inheriting one from
+    // whatever walked the particles. Edge glow is additive-with-coverage, so
+    // where two links cross the order decides the pixel.
+    let mut zipped: Vec<(u32, u32, f32)> = edge_list
+        .iter()
+        .zip(weights.iter())
+        .map(|(&(p, q), &w)| (p, q, w))
+        .collect();
+    zipped.sort_unstable_by_key(|&(p, q, _)| (p, q));
+    let edge_list: Vec<(u32, u32)> = zipped.iter().map(|&(p, q, _)| (p, q)).collect();
+    let weights: Vec<f32> = zipped.iter().map(|&(_, _, w)| w).collect();
+
     debug!("mir: cull -> {} visible, {} edges", visible.len(), edge_list.len());
     gpu.segments = crate::frame::paint::edge_segments(
         &edge_list, &weights, &gpu.pos_cpu, &camera, gpu.viewport);

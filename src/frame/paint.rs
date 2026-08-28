@@ -113,7 +113,14 @@ kernel void paint(
         float2 nd = delta / max(proj_r, 1e-4f);
         float nz = sqrt(max(0.0f, 1.0f - min(dot(nd, nd), 1.0f)));
         float3 nrm = normalize(float3(nd.x, -nd.y, nz));
-        float3 lit = col.xyz * (0.2f + 0.8f * max(0.0f, dot(nrm, LIGHT)));
+        // Including the rim. The sphere pass has one, and a particle crossing
+        // the tier threshold must not change brightness as it changes path —
+        // during an orbit particles cross it constantly, and a step in
+        // brightness on every crossing is what reads as flicker. nz is the
+        // normal's component toward the camera, which is what the sphere pass
+        // computes as dot(n, -ray).
+        float3 lit = col.xyz * (0.2f + 0.8f * max(0.0f, dot(nrm, LIGHT)))
+                   + pow(1.0f - nz, 3.0f) * 0.4f;
         g_rgb += lit * alpha * (1.0f - g_a);
         g_a   += alpha * (1.0f - g_a);
     }
@@ -266,7 +273,14 @@ fn paint(@builtin(global_invocation_id) gid: vec3<u32>) {
         let nd = delta / max(proj_r, 1e-4);
         let nz = sqrt(max(0.0, 1.0 - min(dot(nd, nd), 1.0)));
         let nrm = normalize(vec3<f32>(nd.x, -nd.y, nz));
-        let lit = col.xyz * (0.2 + 0.8 * max(0.0, dot(nrm, LIGHT)));
+        // Including the rim. The sphere pass has one, and a particle crossing
+        // the tier threshold must not change brightness as it changes path —
+        // during an orbit particles cross it constantly, and a step in
+        // brightness on every crossing is what reads as flicker. nz is the
+        // normal's component toward the camera, which is what the sphere pass
+        // computes as dot(n, -ray).
+        let lit = col.xyz * (0.2 + 0.8 * max(0.0, dot(nrm, LIGHT)))
+                + pow(1.0 - nz, 3.0) * 0.4;
         g_rgb += lit * alpha * (1.0 - g_a);
         g_a   += alpha * (1.0 - g_a);
     }
@@ -337,8 +351,14 @@ pub fn sort_by_depth(
         let clip_w = w_col[0] * x + w_col[1] * y + w_col[2] * z + w_col[3];
         if clip_w.abs() < 1e-9 { 0.0 } else { clip_z / clip_w }
     };
+    // Ties break on index, so two particles at the same depth keep the same
+    // order every frame. Left to chance they swap, and swapping the order of
+    // two alpha-composited splats changes the pixels.
     all.sort_unstable_by(|&a, &b| {
-        depth_of(b).partial_cmp(&depth_of(a)).unwrap_or(std::cmp::Ordering::Equal)
+        depth_of(b)
+            .partial_cmp(&depth_of(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.cmp(&b))
     });
     all
 }

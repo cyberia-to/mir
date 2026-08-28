@@ -18,7 +18,20 @@ struct Camera {
     float2   viewport;
     float    near;
     float    far;
+    // The camera's own basis, in world space. A ray cannot be rebuilt from
+    // view_proj's columns: those are the basis already multiplied through the
+    // projection, so they carry the aspect and depth scales and are not unit
+    // vectors in any frame. Reading them as a basis puts every ray-cast
+    // sphere somewhere the rest of the scene is not.
+    float4   cam_pos;
+    float4   cam_right;
+    float4   cam_up;
+    float4   cam_fwd;
 };
+
+// The single light both tiers are lit by. Written normalized rather than
+// normalize()d so the constant is identical in both languages.
+constant float3 LIGHT = float3(0.36370f, 0.72739f, 0.58191f);
 
 static float seg_dist(float2 p, float2 a, float2 b) {
     float2 ab = b - a;
@@ -62,7 +75,9 @@ kernel void paint(
         float4 s0 = segments[e*2];
         float4 s1 = segments[e*2+1];
         float d = seg_dist(pix_f, s0.xy, s0.zw);
-        float alpha = clamp(1.0f - (d - s1.x), 0.0f, 1.0f) * 0.6f;
+        // Analytic coverage across exactly one pixel: the edge of the line
+        // lands where the line ends, instead of a pixel past it.
+        float alpha = (1.0f - smoothstep(s1.x - 0.5f, s1.x + 0.5f, d)) * 0.85f;
         if (alpha <= 0.0f) continue;
         rgb += s1.yzw * alpha * (1.0f - a);
         a = min(a + alpha, 1.0f);
@@ -86,29 +101,40 @@ kernel void paint(
         float sigma2 = proj_r * proj_r * 0.18f;
         if (dist2 > 9.0f * sigma2) continue;
         float alpha = exp(-0.5f * dist2 / sigma2);
-        g_rgb += splats[i*2+1].xyz * alpha * (1.0f - g_a);
+        float4 col = splats[i*2+1];
+        // A particle the sphere pass also draws keeps only its halo. At full
+        // strength the splat competes with the surface beneath it and flattens
+        // the very thing the sphere was for.
+        if (col.w > 0.5f) alpha *= 0.30f;
+        // Everything smaller never reaches that pass, so it is lit here: the
+        // offset within the disc is the normal of the ball it stands for, and
+        // the shading is the sphere pass's, term for term.
+        float2 nd = delta / max(proj_r, 1e-4f);
+        float nz = sqrt(max(0.0f, 1.0f - min(dot(nd, nd), 1.0f)));
+        float3 nrm = normalize(float3(nd.x, -nd.y, nz));
+        float3 lit = col.xyz * (0.2f + 0.8f * max(0.0f, dot(nrm, LIGHT)));
+        g_rgb += lit * alpha * (1.0f - g_a);
         g_a   += alpha * (1.0f - g_a);
     }
     rgb = g_rgb + rgb * (1.0f - g_a);
 
     // ── T2 sphere impostors on top ──
     if (counts.y > 0) {
-        float3 cam_origin = float3(-camera.view_proj[3][0],
-                                   -camera.view_proj[3][1],
-                                   -camera.view_proj[3][2]);
+        float3 cam_origin = camera.cam_pos.xyz;
         float2 ndc;
         ndc.x =  (pix_f.x) / float(W) * 2.0f - 1.0f;
         ndc.y = -(pix_f.y) / float(H) * 2.0f + 1.0f;
+        // view_proj[0][0] is f/aspect and [1][1] is f, so dividing undoes the
+        // projection exactly; the result is a direction in view space, which
+        // the real basis then carries into the world.
         float fx = camera.view_proj[0][0];
         float fy = camera.view_proj[1][1];
-        float3 ray_view = normalize(float3(ndc.x / fx, ndc.y / fy, -1.0f));
-        float3 right   = float3(camera.view_proj[0][0], camera.view_proj[0][1], camera.view_proj[0][2]);
-        float3 up      = float3(camera.view_proj[1][0], camera.view_proj[1][1], camera.view_proj[1][2]);
-        float3 forward = float3(camera.view_proj[2][0], camera.view_proj[2][1], camera.view_proj[2][2]);
-        float3 ray_world = normalize(ray_view.x * right + ray_view.y * up + ray_view.z * forward);
+        float3 ray_world = normalize(camera.cam_right.xyz * (ndc.x / fx)
+                                   + camera.cam_up.xyz    * (ndc.y / fy)
+                                   + camera.cam_fwd.xyz);
 
         float  t_min = 1e9f;
-        float3 hit_n = float3(0, 0, 1);
+        float3 hit_n = float3(0.0f, 0.0f, 1.0f);
         float3 hit_col = float3(0.0f);
         bool   hit_any = false;
         for (uint i = 0; i < counts.y; ++i) {
@@ -122,8 +148,7 @@ kernel void paint(
             }
         }
         if (hit_any) {
-            float3 light = normalize(float3(0.5f, 1.0f, 0.8f));
-            float  diff  = max(0.0f, dot(hit_n, light));
+            float  diff  = max(0.0f, dot(hit_n, LIGHT));
             float  rim   = pow(1.0f - max(0.0f, dot(hit_n, -ray_world)), 3.0f) * 0.4f;
             rgb = hit_col * (0.2f + 0.8f * diff) + rim;
         }
@@ -144,6 +169,15 @@ struct Camera {
     viewport: vec2<f32>,
     near: f32,
     far: f32,
+    // The camera's own basis, in world space. A ray cannot be rebuilt from
+    // view_proj's columns: those are the basis already multiplied through the
+    // projection, so they carry the aspect and depth scales and are not unit
+    // vectors in any frame. Reading them as a basis puts every ray-cast
+    // sphere somewhere the rest of the scene is not.
+    cam_pos: vec4<f32>,
+    cam_right: vec4<f32>,
+    cam_up: vec4<f32>,
+    cam_fwd: vec4<f32>,
 };
 
 @group(0) @binding(0) var<storage, read> splats: array<vec4<f32>>;
@@ -153,6 +187,10 @@ struct Camera {
 @group(0) @binding(4) var<uniform> camera: Camera;
 @group(0) @binding(5) var<uniform> counts: vec4<u32>;
 @group(0) @binding(6) var<uniform> viewport: vec2<u32>;
+
+// The single light both tiers are lit by. Written normalized rather than
+// normalize()d so the constant is identical in both languages.
+const LIGHT = vec3<f32>(0.36370, 0.72739, 0.58191);
 
 fn seg_dist(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
     let ab = b - a;
@@ -189,7 +227,9 @@ fn paint(@builtin(global_invocation_id) gid: vec3<u32>) {
         let s0 = segments[e*2u];
         let s1 = segments[e*2u+1u];
         let d = seg_dist(pix_f, s0.xy, s0.zw);
-        let alpha = clamp(1.0 - (d - s1.x), 0.0, 1.0) * 0.6;
+        // Analytic coverage across exactly one pixel: the edge of the line
+        // lands where the line ends, instead of a pixel past it.
+        let alpha = (1.0 - smoothstep(s1.x - 0.5, s1.x + 0.5, d)) * 0.85;
         if (alpha <= 0.0) { continue; }
         rgb += s1.yzw * alpha * (1.0 - a);
         a = min(a + alpha, 1.0);
@@ -212,26 +252,37 @@ fn paint(@builtin(global_invocation_id) gid: vec3<u32>) {
         let dist2 = dot(delta, delta);
         let sigma2 = proj_r * proj_r * 0.18;
         if (dist2 > 9.0 * sigma2) { continue; }
-        let alpha = exp(-0.5 * dist2 / sigma2);
-        g_rgb += splats[i*2u+1u].xyz * alpha * (1.0 - g_a);
+        var alpha = exp(-0.5 * dist2 / sigma2);
+        let col = splats[i*2u+1u];
+        // A particle the sphere pass also draws keeps only its halo. At full
+        // strength the splat competes with the surface beneath it and flattens
+        // the very thing the sphere was for.
+        if (col.w > 0.5) { alpha *= 0.30; }
+        // Everything smaller never reaches that pass, so it is lit here: the
+        // offset within the disc is the normal of the ball it stands for, and
+        // the shading is the sphere pass's, term for term.
+        let nd = delta / max(proj_r, 1e-4);
+        let nz = sqrt(max(0.0, 1.0 - min(dot(nd, nd), 1.0)));
+        let nrm = normalize(vec3<f32>(nd.x, -nd.y, nz));
+        let lit = col.xyz * (0.2 + 0.8 * max(0.0, dot(nrm, LIGHT)));
+        g_rgb += lit * alpha * (1.0 - g_a);
         g_a   += alpha * (1.0 - g_a);
     }
     rgb = g_rgb + rgb * (1.0 - g_a);
 
     // T2 sphere impostors on top
     if (counts.y > 0u) {
-        let cam_origin = vec3<f32>(-camera.view_proj[3][0],
-                                   -camera.view_proj[3][1],
-                                   -camera.view_proj[3][2]);
+        let cam_origin = camera.cam_pos.xyz;
         let ndc2 = vec2<f32>(pix_f.x / f32(W) * 2.0 - 1.0,
                              -(pix_f.y / f32(H) * 2.0 - 1.0));
+        // view_proj[0][0] is f/aspect and [1][1] is f, so dividing undoes the
+        // projection exactly; the result is a direction in view space, which
+        // the real basis then carries into the world.
         let fx = camera.view_proj[0][0];
         let fy = camera.view_proj[1][1];
-        let ray_view = normalize(vec3<f32>(ndc2.x / fx, ndc2.y / fy, -1.0));
-        let right   = vec3<f32>(camera.view_proj[0][0], camera.view_proj[0][1], camera.view_proj[0][2]);
-        let up      = vec3<f32>(camera.view_proj[1][0], camera.view_proj[1][1], camera.view_proj[1][2]);
-        let forward = vec3<f32>(camera.view_proj[2][0], camera.view_proj[2][1], camera.view_proj[2][2]);
-        let ray_world = normalize(ray_view.x * right + ray_view.y * up + ray_view.z * forward);
+        let ray_world = normalize(camera.cam_right.xyz * (ndc2.x / fx)
+                                + camera.cam_up.xyz    * (ndc2.y / fy)
+                                + camera.cam_fwd.xyz);
 
         var t_min = 1e9;
         var hit_n = vec3<f32>(0.0, 0.0, 1.0);
@@ -248,8 +299,7 @@ fn paint(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
         if (hit_any) {
-            let light = normalize(vec3<f32>(0.5, 1.0, 0.8));
-            let diff = max(0.0, dot(hit_n, light));
+            let diff = max(0.0, dot(hit_n, LIGHT));
             let rim = pow(1.0 - max(0.0, dot(hit_n, -ray_world)), 3.0) * 0.4;
             rgb = hit_col * (0.2 + 0.8 * diff) + rim;
         }
@@ -316,7 +366,9 @@ pub fn edge_segments(
     let mut segs = Vec::with_capacity(edge_list.len() * 8);
     for (k, &(p, q)) in edge_list.iter().enumerate() {
         let (Some(s0), Some(s1)) = (project(p), project(q)) else { continue };
-        let half_w = (weights.get(k).copied().unwrap_or(0.0) * 3.0).clamp(0.5, 4.0) * 0.5;
+        // Physical pixels now, and a link is a line rather than a bar: the
+        // shader feathers it over one pixel, so sub-pixel widths still read.
+        let half_w = (weights.get(k).copied().unwrap_or(0.0) * 1.1).clamp(0.35, 0.9);
         segs.extend_from_slice(&[s0[0], s0[1], s1[0], s1[1], half_w, 0.05, 0.60, 0.10]);
     }
     segs
@@ -371,13 +423,24 @@ impl PaintPass {
             }
             d
         };
-        let splat_data = interleave(sorted);
-        let t2_idx: Vec<u32> = visible.iter()
-            .filter(|(_, t)| *t == TierLevel::T2)
+        // T2 is the *smallest* tier that earns a sphere, not the only one:
+        // T0 and T1 are the nearest, largest particles on screen, and filtering
+        // for equality dropped exactly them onto the flat-splat path. The
+        // biggest thing in the frame was the one guaranteed to look flat.
+        let is_solid = |t: &TierLevel| (*t as u8) <= (TierLevel::T2 as u8);
+        let solid_idx: Vec<u32> = visible.iter()
+            .filter(|(_, t)| is_solid(t))
             .map(|(i, _)| *i)
             .collect();
-        let sphere_data = interleave(&t2_idx);
-        let m = t2_idx.len() as u32;
+        // A splat under a sphere is a halo, not a surface: mark it so the
+        // paint pass keeps it as glow instead of a competing flat disc.
+        let solid_set: std::collections::HashSet<u32> = solid_idx.iter().copied().collect();
+        let mut splat_data = interleave(sorted);
+        for (k, &idx) in sorted.iter().enumerate() {
+            if solid_set.contains(&idx) { splat_data[k * 8 + 7] = 1.0; }
+        }
+        let sphere_data = interleave(&solid_idx);
+        let m = solid_idx.len() as u32;
         let n_edges = (segments.len() / 8) as u32;
 
         let b = |v: &[f32]| self.gpu.buffer_with_data(cast_f32(v));

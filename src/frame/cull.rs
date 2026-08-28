@@ -34,6 +34,13 @@ pub struct Camera {
     /// Near / far clip distances (used for depth normalisation).
     pub near:      f32,
     pub far:       f32,
+    /// Camera position and world-space basis, w unused. The paint pass casts
+    /// rays through these; see the shader-side comment for why it cannot take
+    /// them out of `view_proj`.
+    pub cam_pos:   [f32; 4],
+    pub cam_right: [f32; 4],
+    pub cam_up:    [f32; 4],
+    pub cam_fwd:   [f32; 4],
 }
 
 /// GPU BVH frustum-cull + tier-assignment pass.
@@ -149,6 +156,15 @@ struct Camera {
     float2   viewport;
     float    near;
     float    far;
+    // The camera's own basis, in world space. A ray cannot be rebuilt from
+    // view_proj's columns: those are the basis already multiplied through the
+    // projection, so they carry the aspect and depth scales and are not unit
+    // vectors in any frame. Reading them as a basis puts every ray-cast
+    // sphere somewhere the rest of the scene is not.
+    float4   cam_pos;
+    float4   cam_right;
+    float4   cam_up;
+    float4   cam_fwd;
 };
 
 // Must match `epoch::bvh::BvhNode` plus the is_leaf / leaf fields added here.
@@ -175,9 +191,9 @@ constant float S_T3 =   1.0f;
 static bool aabb_outside_plane(float3 aabb_min, float3 aabb_max, float4 plane) {
     // p-vertex: corner maximising dot(normal, corner)
     float3 p;
-    p.x = (plane.x >= 0) ? aabb_max.x : aabb_min.x;
-    p.y = (plane.y >= 0) ? aabb_max.y : aabb_min.y;
-    p.z = (plane.z >= 0) ? aabb_max.z : aabb_min.z;
+    p.x = (plane.x >= 0.0f) ? aabb_max.x : aabb_min.x;
+    p.y = (plane.y >= 0.0f) ? aabb_max.y : aabb_min.y;
+    p.z = (plane.z >= 0.0f) ? aabb_max.z : aabb_min.z;
     return dot(plane.xyz, p) + plane.w < 0.0f;
 }
 
@@ -255,6 +271,15 @@ struct Camera {
     viewport: vec2<f32>,
     near: f32,
     far: f32,
+    // The camera's own basis, in world space. A ray cannot be rebuilt from
+    // view_proj's columns: those are the basis already multiplied through the
+    // projection, so they carry the aspect and depth scales and are not unit
+    // vectors in any frame. Reading them as a basis puts every ray-cast
+    // sphere somewhere the rest of the scene is not.
+    cam_pos: vec4<f32>,
+    cam_right: vec4<f32>,
+    cam_up: vec4<f32>,
+    cam_fwd: vec4<f32>,
 };
 
 struct BvhNode {

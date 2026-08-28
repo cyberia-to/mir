@@ -21,11 +21,21 @@ pub enum GraphWorldState { #[default] Inactive, Active }
 /// Pixels the offscreen frame may cost. The graph is composited by compute
 /// shaders and read once per frame, so its price is linear in this number —
 /// it buys resolution directly out of the frame budget.
-const FRAME_PIXEL_BUDGET: f32 = 640_000.0;
+///
+/// High enough that a phone and a laptop both paint one texel per screen
+/// pixel; it is a safety valve for very large displays, not a normal limit.
+/// Anything lower shows up as blur, and worse: tier is assigned by screen
+/// diameter, so a frame painted at half resolution demotes every node one
+/// tier and the graph loses its spheres before it loses its sharpness.
+const FRAME_PIXEL_BUDGET: f32 = 4_200_000.0;
 
 /// Offscreen size for a window: the window's own aspect (anything else
 /// stretches the graph, since the image is drawn full-screen) at no more than
 /// the budget.
+///
+/// Takes *physical* pixels. Logical ones are the same number on a 1x monitor
+/// and a fraction of it everywhere else — 443x986 on a 1080x2404 phone, which
+/// is the whole image stretched 2.4x before it reaches the eye.
 fn render_size(win_w: f32, win_h: f32) -> (u32, u32) {
     let (win_w, win_h) = (win_w.max(1.0), win_h.max(1.0));
     let scale = (FRAME_PIXEL_BUDGET / (win_w * win_h)).sqrt().min(1.0);
@@ -42,9 +52,16 @@ pub fn on_enter_graph(
     windows:      Query<&Window>,
 ) {
     info!("mir: entering graph world");
+    // Whatever the window says right now is a guess. On Android the real
+    // surface size arrives a frame or two after the world opens — enter early
+    // enough and the window still reports the size the app *asked* for, which
+    // on a phone is a landscape desktop window that fits no screen at all.
+    // `track_frame_size` corrects this as soon as the truth shows up; here we
+    // only need something valid to allocate.
     let (w, h) = windows
         .single()
-        .map(|win| render_size(win.width(), win.height()))
+        .map(|win| render_size(win.resolution.physical_width() as f32,
+                               win.resolution.physical_height() as f32))
         .unwrap_or((1067, 600));
     info!("mir: frame target {w}x{h}");
 
@@ -280,6 +297,37 @@ fn trace_step(step: &str) {
         seen.push(Box::leak(step.to_string().into_boxed_str()));
         debug!("mir: step {step}");
     }
+}
+
+/// Keep the offscreen frame the size of the window it is drawn into.
+///
+/// Two things make this necessary rather than nice. A window that is resized
+/// keeps painting at its old size and gets stretched. And on Android the size
+/// at world-entry is not the surface size yet, so the first frame target is
+/// simply wrong — large enough, in the case that prompted this, to fail wgpu
+/// validation and take the app down.
+///
+/// The GPU-side buffer already resizes itself off `viewport`; the image has to
+/// be told, and `composite` skips any frame where the two disagree, so a size
+/// change costs one dropped frame and nothing else.
+pub fn track_frame_size(
+    mut gpu:    ResMut<GpuBuffers>,
+    mut images: ResMut<Assets<Image>>,
+    windows:    Query<&Window>,
+) {
+    let Ok(win) = windows.single() else { return };
+    let (w, h) = render_size(win.resolution.physical_width() as f32,
+                             win.resolution.physical_height() as f32);
+    if gpu.viewport == [w, h] { return }
+
+    let Some(handle) = gpu.output_image.clone() else { return };
+    let Some(image) = images.get_mut(&handle) else { return };
+    image.texture_descriptor.size = Extent3d {
+        width: w, height: h, depth_or_array_layers: 1,
+    };
+    image.data = Some(vec![0u8; (w as usize) * (h as usize) * 4]);
+    gpu.viewport = [w, h];
+    info!("mir: frame target {w}x{h}");
 }
 
 pub fn animate_edges(mut gpu: ResMut<GpuBuffers>, time: Res<Time>) {

@@ -140,12 +140,18 @@ impl GraphCamera {
 
     /// Build Camera struct for GPU shaders.
     pub fn to_gpu_camera(&self) -> crate::frame::cull::Camera {
+        let (r, u, f) = (self.right(), self.up(), self.forward());
+        let p = self.position;
         crate::frame::cull::Camera {
             view_proj: self.view_proj(),
             planes:    self.frustum_planes(),
             viewport:  self.viewport,
             near:      self.near,
             far:       self.far,
+            cam_pos:   [p[0], p[1], p[2], 1.0],
+            cam_right: [r[0], r[1], r[2], 0.0],
+            cam_up:    [u[0], u[1], u[2], 0.0],
+            cam_fwd:   [f[0], f[1], f[2], 0.0],
         }
     }
 }

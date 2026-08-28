@@ -7,7 +7,7 @@ use super::world::{
     GraphWorldState,
     animate_edges, composite, dispatch_tiers,
     on_enter_graph, on_exit_graph,
-    swap_epoch_if_ready, sync_visible_entities, tick_diffusion,
+    swap_epoch_if_ready, sync_visible_entities, tick_diffusion, track_frame_size,
     follow_flow_system, warp_to_system,
 };
 
@@ -27,7 +27,7 @@ impl Plugin for GraphWorldPlugin {
                     .chain()
                     .run_if(in_state(GraphWorldState::Active)))
             .add_systems(PostUpdate,
-                (dispatch_tiers, animate_edges, composite)
+                (track_frame_size, dispatch_tiers, animate_edges, composite)
                     .chain()
                     .run_if(in_state(GraphWorldState::Active)));
     }

@@ -150,6 +150,14 @@ impl GraphCamera {
     pub fn to_gpu_camera(&self) -> crate::frame::cull::Camera {
         let (r, u, f) = (self.right(), self.up(), self.forward());
         let p = self.position;
+        // The focal scales, carried in the unused w lanes. They are *not*
+        // view_proj[0][0] and [1][1]: view_proj is P·V, so those entries are
+        // the focal scale times right.x and up.y respectively, and agree with
+        // the focal length only while the camera is unrotated. Reading them
+        // from the matrix makes every projected radius, every tier and every
+        // ray depend on where the camera happens to be pointing.
+        let focal = 1.0 / (self.fov * 0.5).tan();
+        let aspect = self.viewport[0] / self.viewport[1].max(1.0);
         crate::frame::cull::Camera {
             view_proj: self.view_proj(),
             planes:    self.frustum_planes(),
@@ -157,8 +165,8 @@ impl GraphCamera {
             near:      self.near,
             far:       self.far,
             cam_pos:   [p[0], p[1], p[2], 1.0],
-            cam_right: [r[0], r[1], r[2], 0.0],
-            cam_up:    [u[0], u[1], u[2], 0.0],
+            cam_right: [r[0], r[1], r[2], focal / aspect],
+            cam_up:    [u[0], u[1], u[2], focal],
             cam_fwd:   [f[0], f[1], f[2], 0.0],
         }
     }

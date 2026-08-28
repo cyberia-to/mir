@@ -211,7 +211,10 @@ static float screen_diameter(float3 center, float radius, constant Camera &cam) 
     float4 clip = cam.view_proj * float4(center, 1.0f);
     if (clip.w <= 0.0f) return 0.0f;
     // Projected radius estimate: use column[1][1] (fov scale in Y).
-    float proj_r = radius * abs(cam.view_proj[1][1]) / clip.w;
+    // cam_up.w is the focal length; view_proj[1][1] is that times up.y, so
+    // using it would shrink every particle as the camera pitches and drop
+    // whole tiers below the solid threshold for no reason but the angle.
+    float proj_r = radius * cam.cam_up.w / clip.w;
     // Convert to pixels (proj_r is in NDC halves, viewport.y is full height).
     return proj_r * cam.viewport.y;
 }
@@ -324,7 +327,10 @@ fn aabb_culled(aabb_min: vec3<f32>, aabb_max: vec3<f32>) -> bool {
 fn screen_diameter(center: vec3<f32>, radius: f32) -> f32 {
     let clip = cam.view_proj * vec4<f32>(center, 1.0);
     if (clip.w <= 0.0) { return 0.0; }
-    let proj_r = radius * abs(cam.view_proj[1][1]) / clip.w;
+    // cam_up.w is the focal length; view_proj[1][1] is that times up.y, so
+    // using it would shrink every particle as the camera pitches and drop
+    // whole tiers below the solid threshold for no reason but the angle.
+    let proj_r = radius * cam.cam_up.w / clip.w;
     return proj_r * cam.viewport.y;
 }
 

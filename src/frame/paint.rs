@@ -94,21 +94,22 @@ kernel void paint(
         float2 ndc = clip.xy / clip.w;
         float2 screen = float2((ndc.x * 0.5f + 0.5f) * float(W),
                                (1.0f - (ndc.y * 0.5f + 0.5f)) * float(H));
-        float proj_r = max(pr.w * fabs(camera.view_proj[1][1])
+        float proj_r = max(pr.w * camera.cam_up.w
                            / clip.w * float(H) * 0.5f, 0.5f);
-        float2 delta = pix_f - screen;
-        float dist2 = dot(delta, delta);
-        float sigma2 = proj_r * proj_r * 0.18f;
-        if (dist2 > 9.0f * sigma2) continue;
-        float alpha = exp(-0.5f * dist2 / sigma2);
         float4 col = splats[i*2+1];
-        // A particle the sphere pass also draws keeps only its halo. At full
-        // strength the splat competes with the surface beneath it and flattens
-        // the very thing the sphere was for.
-        if (col.w > 0.5f) alpha *= 0.30f;
-        // Everything smaller never reaches that pass, so it is lit here: the
-        // offset within the disc is the normal of the ball it stands for, and
-        // the shading is the sphere pass's, term for term.
+        // Solid particles belong to the sphere pass. Drawing them here as well
+        // only puts a second, softer copy under the first.
+        if (col.w > 0.5f) continue;
+        float2 delta = pix_f - screen;
+        float d = length(delta);
+        // The silhouette the sphere pass would have given this particle, with
+        // one pixel of coverage at the edge. A gaussian was about half this
+        // wide, so a particle crossing the tier threshold changed size in one
+        // frame — that step is what flickers while zooming.
+        float alpha = clamp(proj_r + 0.5f - d, 0.0f, 1.0f);
+        if (alpha <= 0.0f) continue;
+        // Lit as the ball it stands for: the offset within the disc is the
+        // surface normal, and the shading is the sphere pass's, term for term.
         float2 nd = delta / max(proj_r, 1e-4f);
         float nz = sqrt(max(0.0f, 1.0f - min(dot(nd, nd), 1.0f)));
         float3 nrm = normalize(float3(nd.x, -nd.y, nz));
@@ -124,13 +125,13 @@ kernel void paint(
         float2 ndc;
         ndc.x =  (pix_f.x) / float(W) * 2.0f - 1.0f;
         ndc.y = -(pix_f.y) / float(H) * 2.0f + 1.0f;
-        // view_proj[0][0] is f/aspect and [1][1] is f, so dividing undoes the
-        // projection exactly; the result is a direction in view space, which
-        // the real basis then carries into the world.
-        float fx = camera.view_proj[0][0];
-        float fy = camera.view_proj[1][1];
-        float3 ray_world = normalize(camera.cam_right.xyz * (ndc.x / fx)
-                                   + camera.cam_up.xyz    * (ndc.y / fy)
+        // The focal scales come from the camera, not from view_proj: those
+        // entries carry right.x and up.y with them and are only the focal
+        // length while the camera is unrotated. Taking them from the matrix
+        // stretches x and y by different amounts the moment the graph is
+        // turned, which is a sphere drawn as an ellipse.
+        float3 ray_world = normalize(camera.cam_right.xyz * (ndc.x / camera.cam_right.w)
+                                   + camera.cam_up.xyz    * (ndc.y / camera.cam_up.w)
                                    + camera.cam_fwd.xyz);
 
         float  t_min = 1e9f;
@@ -246,21 +247,22 @@ fn paint(@builtin(global_invocation_id) gid: vec3<u32>) {
         let ndc = clip.xy / clip.w;
         let screen = vec2<f32>((ndc.x * 0.5 + 0.5) * f32(W),
                                (1.0 - (ndc.y * 0.5 + 0.5)) * f32(H));
-        let proj_r = max(pr.w * abs(camera.view_proj[1][1])
+        let proj_r = max(pr.w * camera.cam_up.w
                          / clip.w * f32(H) * 0.5, 0.5);
-        let delta = pix_f - screen;
-        let dist2 = dot(delta, delta);
-        let sigma2 = proj_r * proj_r * 0.18;
-        if (dist2 > 9.0 * sigma2) { continue; }
-        var alpha = exp(-0.5 * dist2 / sigma2);
         let col = splats[i*2u+1u];
-        // A particle the sphere pass also draws keeps only its halo. At full
-        // strength the splat competes with the surface beneath it and flattens
-        // the very thing the sphere was for.
-        if (col.w > 0.5) { alpha *= 0.30; }
-        // Everything smaller never reaches that pass, so it is lit here: the
-        // offset within the disc is the normal of the ball it stands for, and
-        // the shading is the sphere pass's, term for term.
+        // Solid particles belong to the sphere pass. Drawing them here as well
+        // only puts a second, softer copy under the first.
+        if (col.w > 0.5) { continue; }
+        let delta = pix_f - screen;
+        let d = length(delta);
+        // The silhouette the sphere pass would have given this particle, with
+        // one pixel of coverage at the edge. A gaussian was about half this
+        // wide, so a particle crossing the tier threshold changed size in one
+        // frame — that step is what flickers while zooming.
+        let alpha = clamp(proj_r + 0.5 - d, 0.0, 1.0);
+        if (alpha <= 0.0) { continue; }
+        // Lit as the ball it stands for: the offset within the disc is the
+        // surface normal, and the shading is the sphere pass's, term for term.
         let nd = delta / max(proj_r, 1e-4);
         let nz = sqrt(max(0.0, 1.0 - min(dot(nd, nd), 1.0)));
         let nrm = normalize(vec3<f32>(nd.x, -nd.y, nz));
@@ -275,13 +277,13 @@ fn paint(@builtin(global_invocation_id) gid: vec3<u32>) {
         let cam_origin = camera.cam_pos.xyz;
         let ndc2 = vec2<f32>(pix_f.x / f32(W) * 2.0 - 1.0,
                              -(pix_f.y / f32(H) * 2.0 - 1.0));
-        // view_proj[0][0] is f/aspect and [1][1] is f, so dividing undoes the
-        // projection exactly; the result is a direction in view space, which
-        // the real basis then carries into the world.
-        let fx = camera.view_proj[0][0];
-        let fy = camera.view_proj[1][1];
-        let ray_world = normalize(camera.cam_right.xyz * (ndc2.x / fx)
-                                + camera.cam_up.xyz    * (ndc2.y / fy)
+        // The focal scales come from the camera, not from view_proj: those
+        // entries carry right.x and up.y with them and are only the focal
+        // length while the camera is unrotated. Taking them from the matrix
+        // stretches x and y by different amounts the moment the graph is
+        // turned, which is a sphere drawn as an ellipse.
+        let ray_world = normalize(camera.cam_right.xyz * (ndc2.x / camera.cam_right.w)
+                                + camera.cam_up.xyz    * (ndc2.y / camera.cam_up.w)
                                 + camera.cam_fwd.xyz);
 
         var t_min = 1e9;

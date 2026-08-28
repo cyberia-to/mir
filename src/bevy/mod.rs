@@ -7,6 +7,8 @@
 //! (see /Users/master/cyber/cyb/bevy/src/worlds/mod.rs — TODO).
 
 pub mod resources;
+#[cfg(not(target_vendor = "apple"))]
+pub mod blit;
 pub mod camera;
 pub mod world;
 pub mod plugin;

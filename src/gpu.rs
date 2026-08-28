@@ -429,6 +429,11 @@ mod wgpu_arm {
     }
 
     impl Buffer {
+        /// The underlying wgpu buffer, so the render world can copy this
+        /// frame straight into a texture instead of routing it through the
+        /// CPU. Same device, same queue — see `install_shared`.
+        pub fn raw(&self) -> &wgpu::Buffer { &self.raw }
+
         /// Wait for the map callback: try_recv + poll in a loop. A single
         /// poll(Wait) can return before the callback registers (seen on the
         /// Pixel 10's PowerVR), and nothing else is guaranteed to poll this

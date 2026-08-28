@@ -39,10 +39,14 @@ const FRAME_PIXEL_BUDGET: f32 = 4_200_000.0;
 fn render_size(win_w: f32, win_h: f32) -> (u32, u32) {
     let (win_w, win_h) = (win_w.max(1.0), win_h.max(1.0));
     let scale = (FRAME_PIXEL_BUDGET / (win_w * win_h)).sqrt().min(1.0);
-    (
-        ((win_w * scale) as u32).max(64),
-        ((win_h * scale) as u32).max(64),
-    )
+    // Width lands on a multiple of 64 pixels — 256 bytes of RGBA8 — because
+    // that is what copy_buffer_to_texture demands of a row, and that copy is
+    // how the frame reaches the screen. It gives up at most 63 pixels of
+    // width, under 6% on the narrowest screen here, and the image is drawn to
+    // fill the window either way. Height follows to keep the aspect exact.
+    let w = ((((win_w * scale) as u32) / 64) * 64).max(64);
+    let h = (w as f32 * (win_h / win_w)).round().max(64.0) as u32;
+    (w, h)
 }
 
 pub fn on_enter_graph(
@@ -234,22 +238,55 @@ pub fn dispatch_tiers(
         if let Err(e) = drawn { warn!("paint: {e}"); }
     }
     cmd.submit();
-    let t0 = std::time::Instant::now();
-    let mut pixels = gpu.last_pixels.take().unwrap_or_default();
-    pixels.resize(pixel_count * 4, 0);
-    {
-        let g = &mut *gpu;
-        if let (Some(dev), Some(q), Some(f8)) = (&g.gpu, &g.sync_queue, &g.frame_u8) {
-            g.reader.fetch(dev, q, f8, &mut pixels);
-        }
-    }
-    timer.record(1, t0.elapsed().as_secs_f32() * 1000.0);
-    timer.record(
-        2,
-        f32::from_bits(COMPOSITE_MS.load(std::sync::atomic::Ordering::Relaxed)),
-    );
 
-    gpu.last_pixels = Some(pixels);
+    // Apple reads the frame back and hands it to Bevy as image data: mir runs
+    // on aruminium's Metal device there, not Bevy's, so there is no shared
+    // texture to write into — and at 140 fps the round trip is free.
+    // Everywhere else `publish_frame` gives the render world the buffer and
+    // the copy happens on the GPU; see bevy::blit.
+    #[cfg(target_vendor = "apple")]
+    {
+        let t0 = std::time::Instant::now();
+        let mut pixels = gpu.last_pixels.take().unwrap_or_default();
+        pixels.resize(pixel_count * 4, 0);
+        {
+            let g = &mut *gpu;
+            if let (Some(dev), Some(q), Some(f8)) = (&g.gpu, &g.sync_queue, &g.frame_u8) {
+                g.reader.fetch(dev, q, f8, &mut pixels);
+            }
+        }
+        timer.record(1, t0.elapsed().as_secs_f32() * 1000.0);
+        timer.record(
+            2,
+            f32::from_bits(COMPOSITE_MS.load(std::sync::atomic::Ordering::Relaxed)),
+        );
+        gpu.last_pixels = Some(pixels);
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        let _ = pixel_count;
+        timer.record(1, 0.0);
+        timer.record(2, 0.0);
+    }
+}
+
+/// Hand the frame the paint pass just wrote to the render world, which copies
+/// it into the screen texture on the GPU. Replaces the readback, the CPU copy
+/// and Bevy's re-upload of the whole image — measured together at 21 ms of a
+/// 40 ms frame on the Pixel.
+#[cfg(not(target_vendor = "apple"))]
+pub fn publish_frame(
+    gpu:     Res<GpuBuffers>,
+    handoff: Res<crate::bevy::blit::FrameHandoff>,
+) {
+    let (Some(buf), Some(handle)) = (&gpu.frame_u8, &gpu.output_image) else { return };
+    let [w, h] = gpu.viewport;
+    handoff.publish(crate::bevy::blit::FrameCopy {
+        buffer: buf.raw().clone(),
+        image:  handle.id(),
+        width:  w,
+        height: h,
+    });
 }
 
 

@@ -368,7 +368,7 @@ pub fn edge_segments(
         let (Some(s0), Some(s1)) = (project(p), project(q)) else { continue };
         // Physical pixels now, and a link is a line rather than a bar: the
         // shader feathers it over one pixel, so sub-pixel widths still read.
-        let half_w = (weights.get(k).copied().unwrap_or(0.0) * 1.1).clamp(0.35, 0.9);
+        let half_w = (weights.get(k).copied().unwrap_or(0.0) * 0.8).clamp(0.25, 0.6);
         segs.extend_from_slice(&[s0[0], s0[1], s1[0], s1[1], half_w, 0.05, 0.60, 0.10]);
     }
     segs

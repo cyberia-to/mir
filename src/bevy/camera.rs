@@ -25,16 +25,23 @@ pub fn update_camera(
     mut scroll: MessageReader<MouseWheel>,
     time:       Res<Time>,
     windows:    Query<&Window>,
+    gpu:        Res<super::resources::GpuBuffers>,
 ) {
     let dt = time.delta_secs();
 
-    // Projection aspect follows the frame target, which mir sizes to the
-    // window's aspect — so this stays right while the target may be smaller.
+    // The frame the paint pass writes, in its own pixels — not the window's
+    // logical size. Aspect would survive either choice, but `screen_diameter`
+    // scales by viewport.y to decide a particle's tier, so a viewport measured
+    // in logical pixels reports every particle at a fraction of its true size
+    // on any display that is not 1x. On a retina Mac that is a halving, which
+    // is enough to push whole tiers of particles below the solid threshold:
+    // the graph goes flat, and does so only on the higher-resolution screen.
+    let frame = [gpu.viewport[0] as f32, gpu.viewport[1] as f32];
+    if cam.viewport != frame && frame[0] > 0.0 && frame[1] > 0.0 {
+        cam.viewport = frame;
+    }
     if let Ok(win) = windows.single() {
-        let aspect_src = [win.width(), win.height()];
-        if cam.viewport != aspect_src {
-            cam.viewport = aspect_src;
-        }
+        cam.input_viewport = [win.width(), win.height()];
     }
 
     // Advance warp animation (§9.2).
@@ -123,7 +130,7 @@ pub fn update_camera(
 /// never sees them, so a thumb on the tab strip does not spin the graph.
 fn apply_touch(cam: &mut GraphCamera, touches: &Touches) {
     let [top, bottom, left, right] = cam.input_inset;
-    let [vw, vh] = cam.viewport;
+    let [vw, vh] = cam.input_viewport;
     let live: Vec<[f32; 2]> = touches
         .iter()
         .map(|t| [t.position().x, t.position().y])

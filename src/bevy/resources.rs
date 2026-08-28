@@ -42,7 +42,14 @@ pub struct GraphCamera {
     pub far:      f32,
     pub tau:      f32,
     pub tau_target: f32,
+    /// The frame the paint pass writes, in its own pixels. Drives projection
+    /// aspect and tier assignment.
     pub viewport: [f32; 2],
+    /// The window, in the logical pixels pointer and touch events arrive in.
+    /// Only [`input_inset`](Self::input_inset) is measured against this; it is
+    /// a different quantity from `viewport` on every display that is not 1x,
+    /// and conflating them lets a thumb on the tab strip spin the graph.
+    pub input_viewport: [f32; 2],
     /// Orbit radius (distance from origin). Derived from position on init,
     /// then driven by scroll; position is recomputed from (yaw,pitch,orbit_dist) each frame.
     pub orbit_dist: f32,
@@ -73,6 +80,7 @@ impl Default for GraphCamera {
             near: 1.0, far: 100_000.0,
             tau: 1.0, tau_target: 1.0,
             viewport: [1280.0, 720.0],
+            input_viewport: [1280.0, 720.0],
             orbit_dist: 3000.0,
             last_cursor: None,
             warp: None,

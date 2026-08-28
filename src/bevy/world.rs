@@ -351,10 +351,41 @@ pub fn composite(
 
     let t0 = std::time::Instant::now();
     data.copy_from_slice(&pixels[..expected]);
+    dump_frame_once(&pixels[..expected], w, h);
     COMPOSITE_MS.store(
         (t0.elapsed().as_secs_f32() * 1000.0).to_bits(),
         std::sync::atomic::Ordering::Relaxed,
     );
+}
+
+/// Write one settled frame to `$MIR_DUMP_FRAME` as a binary PPM, then never
+/// again. Unset, this costs an atomic load per frame and does nothing.
+///
+/// The graph is the one part of cyb whose bugs are only visible as pixels, and
+/// the honest way to look at those pixels is to look at the ones the renderer
+/// produced — not at a photograph of a screen, which adds a compositor, a
+/// scale factor and a colour profile between the defect and the eye. PPM
+/// because it is eight lines of code and every tool reads it.
+fn dump_frame_once(rgba: &[u8], w: u32, h: u32) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static FRAME: AtomicU32 = AtomicU32::new(0);
+    // Let the epoch settle and the camera stop moving first; frame zero is
+    // black and frame one is half a graph.
+    const SETTLED: u32 = 150;
+
+    let n = FRAME.fetch_add(1, Ordering::Relaxed);
+    if n != SETTLED { return }
+    let Ok(path) = std::env::var("MIR_DUMP_FRAME") else { return };
+
+    let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
+    out.reserve(rgba.len() / 4 * 3);
+    for px in rgba.chunks_exact(4) {
+        out.extend_from_slice(&px[..3]);
+    }
+    match std::fs::write(&path, out) {
+        Ok(())  => info!("mir: frame dumped to {path} ({w}x{h})"),
+        Err(e)  => warn!("mir: frame dump to {path} failed: {e}"),
+    }
 }
 
 /// `composite` runs in a later schedule than `dispatch_tiers`, so it hands its

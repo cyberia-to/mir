@@ -125,7 +125,8 @@ pub fn on_enter_graph(
     if let Some(cfg) = config {
         let vocab = Arc::new(crate::graph::ParticleIndex::empty());
         gpu.csr = Some(Arc::clone(&cfg.graph));
-        let (_worker, state) = EpochWorker::spawn(Arc::clone(&cfg.graph), vocab);
+        let (_worker, state) =
+            EpochWorker::spawn_with_values(Arc::clone(&cfg.graph), vocab, cfg.values.clone());
         commands.insert_resource(EpochStateRes { inner: state });
     } else {
         commands.insert_resource(EpochStateRes { inner: epoch_arc });

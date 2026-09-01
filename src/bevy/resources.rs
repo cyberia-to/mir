@@ -18,6 +18,11 @@ pub struct EpochStateRes {
 #[derive(Resource, Clone)]
 pub struct GraphWorldConfig {
     pub graph: Arc<Csr>,
+    /// Externally computed per-particle values, CSR row order. mir renders
+    /// them; it does not compute them — focus and the kernel decomposition
+    /// belong to tru, and a renderer that recomputes truth ends up with two
+    /// truths. `None` falls back to the internal stand-ins.
+    pub values: Option<Arc<crate::epoch::GraphValues>>,
 }
 
 /// The pose of a multi-touch gesture: where the fingers are together, how

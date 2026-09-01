@@ -36,6 +36,19 @@ pub struct EpochState {
     pub nrf:         Option<crate::nrf::NrfState>,
 }
 
+/// Per-particle values computed outside mir, in CSR row order.
+///
+/// `focus` is tru's φ* — the canonical focus distribution the render spec's
+/// visual encoding (§5) is defined over. `kernel` is the tri-kernel
+/// decomposition of that focus: the diffusion / springs / heat components,
+/// normalized per particle, which the palette renders as hue so the *kind*
+/// of attention a particle receives is visible, not just the quantity.
+#[derive(Clone, Debug, Default)]
+pub struct GraphValues {
+    pub focus: Vec<f32>,
+    pub kernel: Vec<[f32; 3]>,
+}
+
 // ── EpochWorker ───────────────────────────────────────────────────────────────
 
 /// Background worker that recomputes spectral layout once per epoch.
@@ -55,12 +68,22 @@ impl EpochWorker {
         graph: Arc<Csr>,
         vocab: Arc<ParticleIndex>,
     ) -> (Self, Arc<RwLock<Option<EpochState>>>) {
+        Self::spawn_with_values(graph, vocab, None)
+    }
+
+    /// Spawn with externally computed per-particle values (tru's focus and
+    /// tri-kernel decomposition). See [`GraphValues`].
+    pub fn spawn_with_values(
+        graph: Arc<Csr>,
+        vocab: Arc<ParticleIndex>,
+        values: Option<Arc<GraphValues>>,
+    ) -> (Self, Arc<RwLock<Option<EpochState>>>) {
         let state: Arc<RwLock<Option<EpochState>>> = Arc::new(RwLock::new(None));
         let state_clone = Arc::clone(&state);
         let graph_clone = Arc::clone(&graph);
 
         std::thread::spawn(move || {
-            epoch_pipeline(&graph_clone, state_clone);
+            epoch_pipeline(&graph_clone, values.as_deref(), state_clone);
         });
 
         let worker = Self { state: Arc::clone(&state), _graph: graph, _vocab: vocab };
@@ -89,7 +112,7 @@ fn hsl_to_rgb(h_rad: f32, s: f32, l: f32) -> [f32; 3] {
     [(r + m).clamp(0.0, 1.0), (g + m).clamp(0.0, 1.0), (b + m).clamp(0.0, 1.0)]
 }
 
-fn epoch_pipeline(csr: &Csr, state_out: Arc<RwLock<Option<EpochState>>>) {
+fn epoch_pipeline(csr: &Csr, values: Option<&GraphValues>, state_out: Arc<RwLock<Option<EpochState>>>) {
     let n = csr.n;
 
     // 1. Compute eigensolver → SpectralCoords.
@@ -122,8 +145,21 @@ fn epoch_pipeline(csr: &Csr, state_out: Arc<RwLock<Option<EpochState>>>) {
         for v in sc.coords.iter_mut() { *v *= scene_scale; }
     }
 
-    // 3. Uniform focus: φ*(i) = 1/n.
-    let focus = vec![if n > 0 { 1.0 / n as f32 } else { 0.0 }; n];
+    // 3. Focus: tru's φ* when the host supplies it; the uniform stand-in
+    // otherwise. Everything downstream — radius, tier, label rank in the
+    // host — keys off this one distribution, which is exactly why it must
+    // come from the one engine that owns it when that engine is present.
+    let focus: Vec<f32> = match values {
+        Some(v) if v.focus.len() == n => {
+            let sum: f32 = v.focus.iter().sum();
+            if sum > 1e-12 {
+                v.focus.iter().map(|f| f / sum).collect()
+            } else {
+                vec![if n > 0 { 1.0 / n as f32 } else { 0.0 }; n]
+            }
+        }
+        _ => vec![if n > 0 { 1.0 / n as f32 } else { 0.0 }; n],
+    };
 
     // 3b. §5.3 Role inference: classify particles by degree.
     let degrees: Vec<usize> = (0..n).map(|i| {
@@ -155,14 +191,40 @@ fn epoch_pipeline(csr: &Csr, state_out: Arc<RwLock<Option<EpochState>>>) {
         let role_mult = match roles[i] { Role::Hub => 1.5, Role::Leaf => 0.7, Role::Sphere => 1.0 };
         r0 * focus[i].sqrt() * role_mult
     }).collect();
-    // Uniform blue palette: hub = bright, sphere = mid, leaf = dark.
+    // Colour speaks the tri-kernel when the decomposition is supplied: the
+    // *kind* of attention a particle draws, not just how much. Diffusion —
+    // reach through the whole graph — stays the family blue; springs —
+    // support from immediate neighbours — pulls toward sea-green; heat —
+    // recent, local warmth — toward violet. Role keeps its job as
+    // brightness: hubs glow, leaves recede. Without a decomposition, the
+    // old role palette stands.
+    const D_COL: [f32; 3] = [0.12, 0.38, 0.92];
+    const S_COL: [f32; 3] = [0.10, 0.72, 0.55];
+    const H_COL: [f32; 3] = [0.58, 0.30, 0.95];
+    let kernel_ok = matches!(values, Some(v) if v.kernel.len() == n);
     let colors: Vec<f32> = (0..n).flat_map(|i| {
-        let (r, g, b) = match roles[i] {
-            Role::Hub    => (0.20f32, 0.55f32, 1.00f32),
-            Role::Sphere => (0.12f32, 0.38f32, 0.88f32),
-            Role::Leaf   => (0.07f32, 0.22f32, 0.68f32),
+        let lum = match roles[i] {
+            Role::Hub    => 1.25f32,
+            Role::Sphere => 1.0,
+            Role::Leaf   => 0.65,
         };
-        [r, g, b]
+        if kernel_ok {
+            let k = values.unwrap().kernel[i];
+            let total = (k[0] + k[1] + k[2]).max(1e-9);
+            let (d, sp, h) = (k[0] / total, k[1] / total, k[2] / total);
+            [
+                ((D_COL[0] * d + S_COL[0] * sp + H_COL[0] * h) * lum).clamp(0.0, 1.0),
+                ((D_COL[1] * d + S_COL[1] * sp + H_COL[1] * h) * lum).clamp(0.0, 1.0),
+                ((D_COL[2] * d + S_COL[2] * sp + H_COL[2] * h) * lum).clamp(0.0, 1.0),
+            ]
+        } else {
+            let (r, g, b) = match roles[i] {
+                Role::Hub    => (0.20f32, 0.55f32, 1.00f32),
+                Role::Sphere => (0.12f32, 0.38f32, 0.88f32),
+                Role::Leaf   => (0.07f32, 0.22f32, 0.68f32),
+            };
+            [r, g, b]
+        }
     }).collect();
 
     // 4. Build BVH.
@@ -203,7 +265,7 @@ fn epoch_pipeline(csr: &Csr, state_out: Arc<RwLock<Option<EpochState>>>) {
 pub fn cpu_reference_epoch(csr: &crate::graph::Csr) -> EpochState {
     use std::sync::{Arc, RwLock};
     let state = Arc::new(RwLock::new(None));
-    epoch_pipeline(csr, Arc::clone(&state));
+    epoch_pipeline(csr, None, Arc::clone(&state));
     let guard = state.read().unwrap();
     guard.as_ref().unwrap().clone()  // EpochState needs Clone
 }

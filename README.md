@@ -92,4 +92,4 @@ glia (run model)     →  neural features
 mir (render)         →  R-1.0 world
 ```
 
-see [[stack]]
+see [[status]]

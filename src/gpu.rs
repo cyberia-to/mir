@@ -653,14 +653,26 @@ mod wgpu_arm {
     /// but wgpu still destroys the `VkBuffer` itself on drop, so this frees
     /// the memory only — destroying the buffer here too is a double-free the
     /// PowerVR driver answers with a SIGSEGV inside `vkDestroyBuffer`.
+    /// Vulkan-only machinery: platforms without the ash dep (windows) take
+    /// the copy path in `wrap` and never construct one of these.
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     struct HostImport {
         device: Arc<wgpu::Device>,
         memory: ash::vk::DeviceMemory,
     }
 
+    /// The stub twin: platforms without vulkan import (windows) never
+    /// construct one — `import_host` refuses before this could exist —
+    /// but the `Buffer.import` slot still needs the type to name.
+    #[cfg(not(any(target_os = "android", target_os = "linux")))]
+    struct HostImport;
+
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     unsafe impl Send for HostImport {}
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     unsafe impl Sync for HostImport {}
 
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     impl Drop for HostImport {
         fn drop(&mut self) {
             // The wgpu buffer is dropped first (field order in Buffer puts

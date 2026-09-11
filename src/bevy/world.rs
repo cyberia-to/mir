@@ -66,11 +66,11 @@ pub fn on_enter_graph(
     config: Option<Res<GraphWorldConfig>>,
     windows: Query<&Window>,
     existing: Query<Entity, With<RenderOutput>>,
-    mut shown: Query<&mut Node, With<RenderOutput>>,
+    mut shown: Query<&mut Visibility, With<RenderOutput>>,
 ) {
     if !existing.is_empty() {
-        for mut node in &mut shown {
-            node.display = Display::Flex;
+        for mut vis in &mut shown {
+            *vis = Visibility::Visible;
         }
         info!("mir: entering graph world (kept)");
         return;
@@ -585,16 +585,16 @@ pub static COMPOSITE_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::Atomi
 pub fn on_exit_graph(
     mut commands: Commands,
     loading_q: Query<Entity, With<LoadingOverlay>>,
-    mut render_q: Query<&mut Node, With<RenderOutput>>,
+    mut render_q: Query<&mut Visibility, With<RenderOutput>>,
 ) {
     info!("mir: exiting graph world");
     for e in loading_q.iter() {
         commands.entity(e).despawn();
     }
-    // Keep the last frame. Despawning the image and allocating a black
-    // texture on the next enter is the flash on every brain tab.
-    for mut node in &mut render_q {
-        node.display = Display::None;
+    // Keep the last frame and its layout. Display::None reflows to zero
+    // and the next show flashes; Hidden just skips the draw.
+    for mut vis in &mut render_q {
+        *vis = Visibility::Hidden;
     }
 }
 

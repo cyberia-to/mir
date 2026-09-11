@@ -66,12 +66,10 @@ pub fn on_enter_graph(
     config: Option<Res<GraphWorldConfig>>,
     windows: Query<&Window>,
     existing: Query<Entity, With<RenderOutput>>,
-    mut shown: Query<&mut Visibility, With<RenderOutput>>,
 ) {
     if !existing.is_empty() {
-        for mut vis in &mut shown {
-            *vis = Visibility::Visible;
-        }
+        // Leave the last frame on screen. Toggling Visibility here was a
+        // full-screen flash every time brain or memory opened.
         info!("mir: entering graph world (kept)");
         return;
     }
@@ -586,20 +584,13 @@ pub static COMPOSITE_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::Atomi
 
 // ── OnExit ────────────────────────────────────────────────────────────────────
 
-pub fn on_exit_graph(
-    mut commands: Commands,
-    loading_q: Query<Entity, With<LoadingOverlay>>,
-    mut render_q: Query<&mut Visibility, With<RenderOutput>>,
-) {
+pub fn on_exit_graph(mut commands: Commands, loading_q: Query<Entity, With<LoadingOverlay>>) {
     info!("mir: exiting graph world");
     for e in loading_q.iter() {
         commands.entity(e).despawn();
     }
-    // Keep the last frame and its layout. Display::None reflows to zero
-    // and the next show flashes; Hidden just skips the draw.
-    for mut vis in &mut render_q {
-        *vis = Visibility::Hidden;
-    }
+    // Do not hide the graph image. Other worlds paint an opaque page over
+    // it. Hiding it opened a hole to the swapchain — the flash.
 }
 
 /// §9.4 Follow-flow: hold Alt to ride the attention current.

@@ -502,9 +502,13 @@ pub fn track_frame_size(
         height: h,
         depth_or_array_layers: 1,
     };
-    image.data = Some(vec![0u8; (w as usize) * (h as usize) * 4]);
+    // Keep the last pixels; filling black and skipping 3 frames is a
+    // visible flash on every surface-size wobble (Android).
+    if image.data.as_ref().map(|d| d.len()) != Some((w as usize) * (h as usize) * 4) {
+        image.data = Some(vec![0u8; (w as usize) * (h as usize) * 4]);
+    }
     gpu.viewport = [w, h];
-    gpu.settle = SETTLE_FRAMES;
+    gpu.settle = 1;
     info!("mir: frame target {w}x{h}");
 }
 

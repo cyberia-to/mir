@@ -18,6 +18,18 @@ pub use wgpu_arm::{
     install_shared,
 };
 
+/// `wgpu_arm::Encoder::bind_buffer` always binds the whole buffer
+/// (`as_entire_binding()`); the facade carries no partial-offset binding at
+/// all, so a nonzero `offset` argument is silently dropped rather than
+/// honored — the caller believes a sub-range is bound while the whole
+/// buffer is read instead, a silent wrong result, not a caught bug. Must
+/// hold in release builds too. Free function (not inlined into `wgpu_arm`,
+/// which only compiles `#[cfg(not(target_vendor = "apple"))]`) so it stays
+/// unit-testable on Apple hardware as well.
+pub(crate) fn assert_whole_buffer_offset(offset: usize) {
+    assert_eq!(offset, 0, "facade carries whole-buffer bindings");
+}
+
 /// Per-frame readback of the packed frame, unified-memory arm: one sync,
 /// one mapped copy — the readback that was always cheap here stays sync.
 #[cfg(target_vendor = "apple")]
@@ -351,7 +363,7 @@ mod wgpu_arm {
         }
 
         pub fn bind_buffer(&self, buffer: &Buffer, offset: usize, index: usize) {
-            debug_assert_eq!(offset, 0, "facade carries whole-buffer bindings");
+            super::assert_whole_buffer_offset(offset);
             self.state.lock().unwrap().entries.push((index as u32, buffer.raw.clone()));
         }
 
@@ -967,5 +979,21 @@ mod wgpu_arm {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::assert_whole_buffer_offset;
+
+    #[test]
+    fn accepts_a_zero_offset() {
+        assert_whole_buffer_offset(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "facade carries whole-buffer bindings")]
+    fn rejects_a_nonzero_offset() {
+        assert_whole_buffer_offset(16);
     }
 }

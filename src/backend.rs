@@ -231,18 +231,72 @@ pub fn csr_matvec_set(row_ptr: &[u32], col_idx: &[u32], values: &[f32], x: &[f32
     }
     #[cfg(not(target_vendor = "apple"))]
     {
-        let n = row_ptr.len().saturating_sub(1);
-        debug_assert_eq!(y.len(), n);
-        debug_assert_eq!(col_idx.len(), values.len());
-        y.fill(0.0);
-        for i in 0..n {
-            let s = row_ptr[i] as usize;
-            let e = row_ptr[i + 1] as usize;
-            let mut acc = 0.0f32;
-            for k in s..e {
-                acc += values[k] * x[col_idx[k] as usize];
-            }
-            y[i] = acc;
+        csr_matvec_portable(row_ptr, col_idx, values, x, y);
+    }
+}
+
+/// The portable (non-Apple) half of [`csr_matvec_set`], pulled out of its
+/// `cfg` gate so it compiles — and its invariants are directly testable — on
+/// every platform, not only the ones that actually dispatch into it. Dead on
+/// an Apple production build, where `csr_matvec_set` takes the `acpu` path.
+#[cfg_attr(target_vendor = "apple", allow(dead_code))]
+fn csr_matvec_portable(row_ptr: &[u32], col_idx: &[u32], values: &[f32], x: &[f32], y: &mut [f32]) {
+    let n = row_ptr.len().saturating_sub(1);
+    assert_eq!(y.len(), n, "csr_matvec_portable: y.len() {} != row count {n}", y.len());
+    assert_eq!(
+        col_idx.len(),
+        values.len(),
+        "csr_matvec_portable: col_idx.len() {} != values.len() {}",
+        col_idx.len(),
+        values.len()
+    );
+    y.fill(0.0);
+    for i in 0..n {
+        let s = row_ptr[i] as usize;
+        let e = row_ptr[i + 1] as usize;
+        let mut acc = 0.0f32;
+        for k in s..e {
+            acc += values[k] * x[col_idx[k] as usize];
         }
+        y[i] = acc;
+    }
+}
+
+#[cfg(test)]
+mod sparse_tests {
+    use super::csr_matvec_portable;
+
+    #[test]
+    fn csr_matvec_portable_matches_dense() {
+        // [[1, 2, 0], [0, 3, 4]] · [1, 1, 1] = [3, 7]
+        let row_ptr = [0u32, 2, 4];
+        let col_idx = [0u32, 1, 1, 2];
+        let values = [1.0f32, 2.0, 3.0, 4.0];
+        let x = [1.0f32, 1.0, 1.0];
+        let mut y = [0.0f32; 2];
+        csr_matvec_portable(&row_ptr, &col_idx, &values, &x, &mut y);
+        assert_eq!(y, [3.0, 7.0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "y.len()")]
+    fn csr_matvec_portable_rejects_wrong_y_len() {
+        let row_ptr = [0u32, 1];
+        let col_idx = [0u32];
+        let values = [1.0f32];
+        let x = [1.0f32];
+        let mut y = [0.0f32; 2]; // row count is 1, not 2
+        csr_matvec_portable(&row_ptr, &col_idx, &values, &x, &mut y);
+    }
+
+    #[test]
+    #[should_panic(expected = "col_idx.len()")]
+    fn csr_matvec_portable_rejects_col_idx_values_mismatch() {
+        let row_ptr = [0u32, 1];
+        let col_idx = [0u32];
+        let values = [1.0f32, 2.0]; // longer than col_idx
+        let x = [1.0f32];
+        let mut y = [0.0f32; 1];
+        csr_matvec_portable(&row_ptr, &col_idx, &values, &x, &mut y);
     }
 }

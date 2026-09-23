@@ -168,7 +168,9 @@ fn index_sections(
         }
         let start = cur + header.len();
         let end = match entry.size {
-            Some(sz) => start + sz as usize,
+            Some(sz) => start.checked_add(sz as usize).ok_or_else(|| {
+                MirError::InvalidGraph(format!("section `{}` size overflows", entry.name))
+            })?,
             None => find_text_end(bytes, start),
         };
         if end > bytes.len() {
@@ -208,5 +210,29 @@ mod tests {
         assert_eq!(c.amount, 999);
         assert_eq!(c.valence, 1);
         assert_eq!(c.block, 12345);
+    }
+
+    #[test]
+    fn index_sections_rejects_overflowing_size() {
+        let bytes = b"~~~foo\nhello".to_vec();
+        let entries = vec![FileEntry {
+            name: "foo".to_string(),
+            format: "text".to_string(),
+            size: Some(u64::MAX - 5),
+        }];
+        let err = index_sections(&bytes, 0, &entries).unwrap_err();
+        assert!(matches!(err, MirError::InvalidGraph(_)));
+    }
+
+    #[test]
+    fn index_sections_bounds_a_sized_section() {
+        let bytes = b"~~~foo\nhello~~~bar\nworld".to_vec();
+        let entries = vec![
+            FileEntry { name: "foo".to_string(), format: "text".to_string(), size: Some(5) },
+            FileEntry { name: "bar".to_string(), format: "text".to_string(), size: None },
+        ];
+        let sections = index_sections(&bytes, 0, &entries).unwrap();
+        assert_eq!(&bytes[sections["foo"].0..sections["foo"].1], b"hello");
+        assert_eq!(&bytes[sections["bar"].0..sections["bar"].1], b"world");
     }
 }

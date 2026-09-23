@@ -18,6 +18,16 @@ pub use wgpu_arm::{
     install_shared,
 };
 
+/// The alignment `wgpu_arm`'s `read_f32`/`write_f32` need before they
+/// reinterpret a mapped byte range as `[f32]` through `from_raw_parts`: an
+/// under-aligned address there is undefined behavior, not a wrong value, so
+/// this must hold in release builds too. Free function (not inlined into
+/// `wgpu_arm`, which only compiles `#[cfg(not(target_vendor = "apple"))]`)
+/// so it stays unit-testable on Apple hardware as well.
+pub(crate) fn assert_f32_aligned(addr: usize) {
+    assert_eq!(addr % 4, 0, "mapped range under-aligned");
+}
+
 /// Per-frame readback of the packed frame, unified-memory arm: one sync,
 /// one mapped copy — the readback that was always cheap here stays sync.
 #[cfg(target_vendor = "apple")]
@@ -547,7 +557,7 @@ mod wgpu_arm {
         {
             self.read(|bytes| {
                 let len = bytes.len() / 4;
-                debug_assert_eq!(bytes.as_ptr() as usize % 4, 0, "mapped range under-aligned");
+                super::assert_f32_aligned(bytes.as_ptr() as usize);
                 let floats =
                     unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, len) };
                 f(floats)
@@ -560,7 +570,7 @@ mod wgpu_arm {
         {
             self.write(|bytes| {
                 let len = bytes.len() / 4;
-                debug_assert_eq!(bytes.as_ptr() as usize % 4, 0, "mapped range under-aligned");
+                super::assert_f32_aligned(bytes.as_ptr() as usize);
                 let floats =
                     unsafe { std::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut f32, len) };
                 f(floats)
@@ -967,5 +977,23 @@ mod wgpu_arm {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::assert_f32_aligned;
+
+    #[test]
+    fn accepts_every_four_byte_aligned_address() {
+        for addr in [0usize, 4, 8, 4096, 0x1000_0000] {
+            assert_f32_aligned(addr);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "mapped range under-aligned")]
+    fn rejects_an_under_aligned_address() {
+        assert_f32_aligned(1);
     }
 }

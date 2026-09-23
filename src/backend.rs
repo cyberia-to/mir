@@ -225,15 +225,27 @@ mod tests {
 /// order — f32 accumulation left to right per row — so the result is
 /// bit-for-bit the same and conformance holds across backends.
 pub fn csr_matvec_set(row_ptr: &[u32], col_idx: &[u32], values: &[f32], x: &[f32], y: &mut [f32]) {
+    // Enforced on every target and every build profile (not `debug_assert!`):
+    // on the portable path below, a length mismatch used to only fail if the
+    // resulting out-of-range index happened to be reached; the apple path
+    // forwards into `acpu::sparse::csr_matvec_set`'s own unchecked-index NEON
+    // loop, where the identical mismatch is out-of-bounds memory access, not
+    // a panic (mir #118, honeycrisp #117).
+    let n = row_ptr.len().saturating_sub(1);
+    assert_eq!(y.len(), n, "csr_matvec_set: y.len() {} != row count {}", y.len(), n);
+    assert_eq!(
+        col_idx.len(),
+        values.len(),
+        "csr_matvec_set: col_idx.len() {} != values.len() {}",
+        col_idx.len(),
+        values.len()
+    );
     #[cfg(target_vendor = "apple")]
     {
         acpu::sparse::csr_matvec_set(row_ptr, col_idx, values, x, y);
     }
     #[cfg(not(target_vendor = "apple"))]
     {
-        let n = row_ptr.len().saturating_sub(1);
-        debug_assert_eq!(y.len(), n);
-        debug_assert_eq!(col_idx.len(), values.len());
         y.fill(0.0);
         for i in 0..n {
             let s = row_ptr[i] as usize;
@@ -244,5 +256,44 @@ pub fn csr_matvec_set(row_ptr: &[u32], col_idx: &[u32], values: &[f32], x: &[f32
             }
             y[i] = acc;
         }
+    }
+}
+
+#[cfg(test)]
+mod csr_matvec_set_tests {
+    use super::csr_matvec_set;
+
+    #[test]
+    fn matches_dense_reference() {
+        // 2x3 sparse matrix [[1,0,2],[0,3,0]] times x = [1,1,1]
+        let row_ptr = [0u32, 2, 3];
+        let col_idx = [0u32, 2, 1];
+        let values = [1.0f32, 2.0, 3.0];
+        let x = [1.0f32, 1.0, 1.0];
+        let mut y = [0.0f32; 2];
+        csr_matvec_set(&row_ptr, &col_idx, &values, &x, &mut y);
+        assert_eq!(y, [3.0, 3.0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "y.len()")]
+    fn panics_on_y_length_mismatch() {
+        let row_ptr = [0u32, 1];
+        let col_idx = [0u32];
+        let values = [1.0f32];
+        let x = [1.0f32];
+        let mut y = [0.0f32; 2]; // should be len 1
+        csr_matvec_set(&row_ptr, &col_idx, &values, &x, &mut y);
+    }
+
+    #[test]
+    #[should_panic(expected = "col_idx.len()")]
+    fn panics_on_col_idx_values_length_mismatch() {
+        let row_ptr = [0u32, 1];
+        let col_idx = [0u32, 1]; // should be len 1
+        let values = [1.0f32];
+        let x = [1.0f32];
+        let mut y = [0.0f32; 1];
+        csr_matvec_set(&row_ptr, &col_idx, &values, &x, &mut y);
     }
 }

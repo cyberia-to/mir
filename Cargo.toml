@@ -38,3 +38,15 @@ ash = "0.38"
 
 [dev-dependencies]
 tempfile = "3"
+
+[[test]]
+name = "cull_agreement"
+required-features = ["bevy-plugin"]
+
+[[test]]
+name = "sphere_geometry"
+required-features = ["bevy-plugin"]
+
+[[test]]
+name = "frame_determinism"
+required-features = ["bevy-plugin"]

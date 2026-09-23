@@ -181,26 +181,82 @@ impl CullPass {
             u32::from_le_bytes([b[0], b[1], b[2], b[3]])
         }) as usize;
 
-        let entries = out_buf.read(|b| {
-            let mut v = Vec::with_capacity(count);
-            for i in 0..count {
-                let off = i * 8;
-                if off + 8 > b.len() { break; }
-                let idx  = u32::from_le_bytes([b[off],   b[off+1], b[off+2], b[off+3]]);
-                let tier = u32::from_le_bytes([b[off+4], b[off+5], b[off+6], b[off+7]]);
-                let tl = match tier {
-                    0 => TierLevel::T0,
-                    1 => TierLevel::T1,
-                    2 => TierLevel::T2,
-                    3 => TierLevel::T3,
-                    _ => TierLevel::TInf,
-                };
-                v.push((idx, tl));
-            }
-            v
-        });
+        let entries = out_buf.read(|b| decode_visible_entries(count, b));
 
         Ok(VisibleSet { entries })
+    }
+}
+
+/// Decode the GPU cull pass's packed `(idx, tier)` output.
+///
+/// `count` comes from an atomic counter the compute kernel writes back
+/// alongside this buffer — trusted in the ordinary case, but not bounded
+/// against the buffer's real size before this call. Capping the
+/// preallocation at what `b` could actually hold keeps a corrupted or
+/// stale `count` (a readback race, a kernel bug) from driving an
+/// allocation far larger than any real frame needs; the existing
+/// `off + 8 > b.len()` guard already stops the loop at the same point.
+fn decode_visible_entries(count: usize, b: &[u8]) -> Vec<(u32, TierLevel)> {
+    let mut v = Vec::with_capacity(count.min(b.len() / 8));
+    for i in 0..count {
+        let off = i * 8;
+        if off + 8 > b.len() { break; }
+        let idx  = u32::from_le_bytes([b[off],   b[off+1], b[off+2], b[off+3]]);
+        let tier = u32::from_le_bytes([b[off+4], b[off+5], b[off+6], b[off+7]]);
+        let tl = match tier {
+            0 => TierLevel::T0,
+            1 => TierLevel::T1,
+            2 => TierLevel::T2,
+            3 => TierLevel::T3,
+            _ => TierLevel::TInf,
+        };
+        v.push((idx, tl));
+    }
+    v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry_bytes(idx: u32, tier: u32) -> [u8; 8] {
+        let mut out = [0u8; 8];
+        out[..4].copy_from_slice(&idx.to_le_bytes());
+        out[4..].copy_from_slice(&tier.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn decode_visible_entries_reads_in_order() {
+        let mut b = Vec::new();
+        b.extend_from_slice(&entry_bytes(7, 0));
+        b.extend_from_slice(&entry_bytes(3, 4));
+        let entries = decode_visible_entries(2, &b);
+        assert_eq!(entries, vec![(7, TierLevel::T0), (3, TierLevel::TInf)]);
+    }
+
+    #[test]
+    fn decode_visible_entries_stops_at_buffer_end() {
+        // count claims 3 entries but the buffer only holds 1 — the
+        // existing per-entry bounds check must still cut the loop short.
+        let b = entry_bytes(9, 2);
+        let entries = decode_visible_entries(3, &b);
+        assert_eq!(entries, vec![(9, TierLevel::T2)]);
+    }
+
+    #[test]
+    fn decode_visible_entries_caps_preallocation_on_a_huge_count() {
+        // A corrupted or stale readback count (u32::MAX) must not drive an
+        // allocation anywhere near that size — only what the buffer holds.
+        let b = entry_bytes(1, 1);
+        let entries = decode_visible_entries(u32::MAX as usize, &b);
+        assert_eq!(entries, vec![(1, TierLevel::T1)]);
+    }
+
+    #[test]
+    fn decode_visible_entries_empty_count() {
+        let b: [u8; 0] = [];
+        assert!(decode_visible_entries(0, &b).is_empty());
     }
 }
 

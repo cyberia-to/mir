@@ -21,6 +21,7 @@ bevy      = { version = "0.18", optional = true }
 [target.'cfg(target_vendor = "apple")'.dependencies]
 aruminium = { path = "../honeycrisp/aruminium" }
 acpu      = { path = "../honeycrisp/acpu" }
+unimem    = { path = "../honeycrisp/unimem" }
 
 # The portable device layer (Vulkan / DX12 / GL). Same wgpu major as Bevy,
 # so cyb's binary carries one copy.

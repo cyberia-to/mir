@@ -65,9 +65,9 @@ pub struct GraphCamera {
     pub last_cursor: Option<[f32; 2]>,
     /// Previous frame's multi-touch pose, for gesture deltas.
     pub touch_prev: Option<TouchPose>,
-    /// Screen margins the host's chrome occupies, in logical pixels
-    /// (top, bottom, left, right). Touches landing inside are the chrome's,
-    /// not the camera's — mir never learns what the chrome *is*.
+    /// Screen margins the host's chroma occupies, in logical pixels
+    /// (top, bottom, left, right). Touches landing inside are the chroma's,
+    /// not the camera's — mir never learns what the chroma *is*.
     pub input_inset: [f32; 4],
     /// Active §9.2 warp animation (None if free-fly).
     pub warp: Option<WarpAnim>,

@@ -122,6 +122,7 @@ pub fn on_enter_graph(
             ..default()
         },
         ZIndex(-1),
+        Pickable::IGNORE,
     ));
 
     // Loading overlay.
@@ -510,7 +511,8 @@ pub fn track_frame_size(
         win.resolution.physical_width() as f32,
         win.resolution.physical_height() as f32,
     );
-    if gpu.viewport == [w, h] {
+    let [cw, ch] = gpu.viewport;
+    if cw.abs_diff(w) <= 2 && ch.abs_diff(h) <= 2 {
         return;
     }
 

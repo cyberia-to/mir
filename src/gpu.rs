@@ -18,6 +18,30 @@ pub use wgpu_arm::{
     install_shared,
 };
 
+/// The alignment `wgpu_arm`'s `read_f32`/`write_f32` need before they
+/// reinterpret a mapped byte range as `[f32]` through `from_raw_parts`: an
+/// under-aligned address there is undefined behavior, not a wrong value, so
+/// this must hold in release builds too. Free function (not inlined into
+/// `wgpu_arm`, which only compiles `#[cfg(not(target_vendor = "apple"))]`)
+/// so it stays unit-testable on Apple hardware as well.
+#[cfg_attr(target_vendor = "apple", allow(dead_code))]
+pub(crate) fn assert_f32_aligned(addr: usize) {
+    assert_eq!(addr % 4, 0, "mapped range under-aligned");
+}
+
+/// `wgpu_arm::Encoder::bind_buffer` always binds the whole buffer
+/// (`as_entire_binding()`); the facade carries no partial-offset binding at
+/// all, so a nonzero `offset` argument is silently dropped rather than
+/// honored — the caller believes a sub-range is bound while the whole
+/// buffer is read instead, a silent wrong result, not a caught bug. Must
+/// hold in release builds too. Free function (not inlined into `wgpu_arm`,
+/// which only compiles `#[cfg(not(target_vendor = "apple"))]`) so it stays
+/// unit-testable on Apple hardware as well.
+#[cfg_attr(target_vendor = "apple", allow(dead_code))]
+pub(crate) fn assert_whole_buffer_offset(offset: usize) {
+    assert_eq!(offset, 0, "facade carries whole-buffer bindings");
+}
+
 /// Per-frame readback of the packed frame, unified-memory arm: one sync,
 /// one mapped copy — the readback that was always cheap here stays sync.
 #[cfg(target_vendor = "apple")]
@@ -351,7 +375,7 @@ mod wgpu_arm {
         }
 
         pub fn bind_buffer(&self, buffer: &Buffer, offset: usize, index: usize) {
-            debug_assert_eq!(offset, 0, "facade carries whole-buffer bindings");
+            super::assert_whole_buffer_offset(offset);
             self.state.lock().unwrap().entries.push((index as u32, buffer.raw.clone()));
         }
 
@@ -547,7 +571,7 @@ mod wgpu_arm {
         {
             self.read(|bytes| {
                 let len = bytes.len() / 4;
-                debug_assert_eq!(bytes.as_ptr() as usize % 4, 0, "mapped range under-aligned");
+                super::assert_f32_aligned(bytes.as_ptr() as usize);
                 let floats =
                     unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, len) };
                 f(floats)
@@ -560,7 +584,7 @@ mod wgpu_arm {
         {
             self.write(|bytes| {
                 let len = bytes.len() / 4;
-                debug_assert_eq!(bytes.as_ptr() as usize % 4, 0, "mapped range under-aligned");
+                super::assert_f32_aligned(bytes.as_ptr() as usize);
                 let floats =
                     unsafe { std::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut f32, len) };
                 f(floats)
@@ -967,5 +991,34 @@ mod wgpu_arm {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{assert_f32_aligned, assert_whole_buffer_offset};
+
+    #[test]
+    fn accepts_every_four_byte_aligned_address() {
+        for addr in [0usize, 4, 8, 4096, 0x1000_0000] {
+            assert_f32_aligned(addr);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "mapped range under-aligned")]
+    fn rejects_an_under_aligned_address() {
+        assert_f32_aligned(1);
+    }
+
+    #[test]
+    fn accepts_a_zero_offset() {
+        assert_whole_buffer_offset(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "facade carries whole-buffer bindings")]
+    fn rejects_a_nonzero_offset() {
+        assert_whole_buffer_offset(16);
     }
 }

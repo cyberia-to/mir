@@ -43,8 +43,8 @@ pub fn degree_vec(csr: &Csr) -> Vec<f32> {
 /// Uses `crate::backend::csr_matvec_set` for the A·z step.
 pub fn laplacian_matvec(csr: &Csr, d_inv_sqrt: &[f32], x: &[f32], y: &mut [f32]) {
     let n = csr.n;
-    debug_assert_eq!(x.len(), n);
-    debug_assert_eq!(y.len(), n);
+    assert_eq!(x.len(), n, "laplacian_matvec: x.len() != csr.n");
+    assert_eq!(y.len(), n, "laplacian_matvec: y.len() != csr.n");
 
     // z[i] = d_inv_sqrt[i] * x[i]
     let mut z = vec![0.0f32; n];
@@ -566,5 +566,31 @@ mod tests {
         for (i, &v) in coords.coords.iter().enumerate() {
             assert!(v.is_finite(), "coords[{i}] = {v}");
         }
+    }
+
+    /// `laplacian_matvec`'s length checks were `debug_assert_eq!`, compiled
+    /// out in release. A short `y` must still be rejected loudly instead of
+    /// silently under-writing the caller's buffer through the unsafe CSR
+    /// matvec this function forwards into.
+    #[test]
+    #[should_panic(expected = "y.len() != csr.n")]
+    fn laplacian_matvec_rejects_short_y() {
+        let csr = path6_csr();
+        let deg = degree_vec(&csr);
+        let d_inv_sqrt: Vec<f32> = deg.iter().map(|&d| if d > 0.0 { 1.0 / d.sqrt() } else { 0.0 }).collect();
+        let x = vec![1.0f32; csr.n];
+        let mut y = vec![0.0f32; csr.n - 1];
+        laplacian_matvec(&csr, &d_inv_sqrt, &x, &mut y);
+    }
+
+    #[test]
+    #[should_panic(expected = "x.len() != csr.n")]
+    fn laplacian_matvec_rejects_short_x() {
+        let csr = path6_csr();
+        let deg = degree_vec(&csr);
+        let d_inv_sqrt: Vec<f32> = deg.iter().map(|&d| if d > 0.0 { 1.0 / d.sqrt() } else { 0.0 }).collect();
+        let x = vec![1.0f32; csr.n - 1];
+        let mut y = vec![0.0f32; csr.n];
+        laplacian_matvec(&csr, &d_inv_sqrt, &x, &mut y);
     }
 }

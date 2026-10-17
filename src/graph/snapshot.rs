@@ -168,7 +168,9 @@ fn index_sections(
         }
         let start = cur + header.len();
         let end = match entry.size {
-            Some(sz) => start + sz as usize,
+            Some(sz) => start.checked_add(sz as usize).ok_or_else(|| {
+                MirError::InvalidGraph(format!("section `{}` size overflows", entry.name))
+            })?,
             None => find_text_end(bytes, start),
         };
         if end > bytes.len() {
@@ -208,5 +210,108 @@ mod tests {
         assert_eq!(c.amount, 999);
         assert_eq!(c.valence, 1);
         assert_eq!(c.block, 12345);
+    }
+
+    #[test]
+    fn index_sections_rejects_overflowing_size() {
+        let bytes = b"~~~foo\nhello".to_vec();
+        let entries = vec![FileEntry {
+            name: "foo".to_string(),
+            format: "text".to_string(),
+            size: Some(u64::MAX - 5),
+        }];
+        let err = index_sections(&bytes, 0, &entries).unwrap_err();
+        assert!(matches!(err, MirError::InvalidGraph(_)));
+    }
+
+    #[test]
+    fn index_sections_bounds_a_sized_section() {
+        let bytes = b"~~~foo\nhello~~~bar\nworld".to_vec();
+        let entries = vec![
+            FileEntry { name: "foo".to_string(), format: "text".to_string(), size: Some(5) },
+            FileEntry { name: "bar".to_string(), format: "text".to_string(), size: None },
+        ];
+        let sections = index_sections(&bytes, 0, &entries).unwrap();
+        assert_eq!(&bytes[sections["foo"].0..sections["foo"].1], b"hello");
+        assert_eq!(&bytes[sections["bar"].0..sections["bar"].1], b"world");
+    }
+
+    fn record(neuron: u8, from: u8, to: u8, token: u32, amount: u128, valence: i8, block: u64) -> [u8; RECORD_SIZE] {
+        let mut buf = [0u8; RECORD_SIZE];
+        buf[0..32].fill(neuron);
+        buf[32..64].fill(from);
+        buf[64..96].fill(to);
+        buf[96..100].copy_from_slice(&token.to_le_bytes());
+        buf[100..116].copy_from_slice(&amount.to_le_bytes());
+        buf[116] = valence as u8;
+        buf[117..125].copy_from_slice(&block.to_le_bytes());
+        buf
+    }
+
+    #[test]
+    fn decode_reads_every_field_at_its_documented_offset() {
+        let buf = record(0x11, 0x22, 0x33, 7, 8, -1, 9);
+        let c = Cyberlink::decode(&buf);
+        assert_eq!(c.neuron, [0x11u8; 32]);
+        assert_eq!(c.from, [0x22u8; 32]);
+        assert_eq!(c.to, [0x33u8; 32]);
+        assert_eq!(c.token, 7);
+        assert_eq!(c.amount, 8);
+        assert_eq!(c.valence, -1);
+        assert_eq!(c.block, 9);
+    }
+
+    #[test]
+    fn decode_valence_round_trips_full_signed_range() {
+        for v in [i8::MIN, -1, 0, 1, i8::MAX] {
+            let buf = record(0, 0, 0, 0, 0, v, 0);
+            assert_eq!(Cyberlink::decode(&buf).valence, v);
+        }
+    }
+
+    #[test]
+    fn decode_never_reads_the_padding_bytes() {
+        let mut a = record(1, 2, 3, 4, 5, 6, 7);
+        let b = a;
+        a[125..128].copy_from_slice(&[0xaa, 0xbb, 0xcc]);
+        let mut c = b;
+        c[125..128].copy_from_slice(&[0x00, 0x11, 0x22]);
+        assert_eq!(Cyberlink::decode(&a).token, Cyberlink::decode(&c).token);
+        assert_eq!(Cyberlink::decode(&a).amount, Cyberlink::decode(&c).amount);
+        assert_eq!(Cyberlink::decode(&a).valence, Cyberlink::decode(&c).valence);
+        assert_eq!(Cyberlink::decode(&a).block, Cyberlink::decode(&c).block);
+    }
+
+    #[test]
+    fn iter_over_empty_input_yields_nothing() {
+        let mut it = CyberlinkIter { bytes: &[], pos: 0 };
+        assert_eq!(it.len(), 0);
+        assert!(it.next().is_none());
+    }
+
+    #[test]
+    fn iter_drops_a_short_trailing_chunk_instead_of_panicking() {
+        let mut bytes = record(1, 1, 1, 1, 1, 1, 1).to_vec();
+        bytes.extend_from_slice(&[0u8; 10]); // short trailing chunk, not a full record
+        let mut it = CyberlinkIter { bytes: &bytes, pos: 0 };
+        assert!(it.next().is_some());
+        assert!(it.next().is_none());
+    }
+
+    #[test]
+    fn iter_yields_every_exact_record_in_order_and_tracks_len() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&record(1, 1, 1, 10, 0, 0, 0));
+        bytes.extend_from_slice(&record(2, 2, 2, 20, 0, 0, 0));
+        bytes.extend_from_slice(&record(3, 3, 3, 30, 0, 0, 0));
+        let mut it = CyberlinkIter { bytes: &bytes, pos: 0 };
+        assert_eq!(it.len(), 3);
+        assert_eq!(it.next().unwrap().token, 10);
+        assert_eq!(it.len(), 2);
+        assert_eq!(it.next().unwrap().token, 20);
+        assert_eq!(it.len(), 1);
+        assert_eq!(it.next().unwrap().token, 30);
+        assert_eq!(it.len(), 0);
+        assert!(it.next().is_none());
     }
 }

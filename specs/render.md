@@ -57,7 +57,7 @@ The spec covers:
 - determinism contract (§12) and backend interface (§13)
 
 It does **not** cover:
-- UI chrome (menus, search bar, settings) — handled by the shell ([[bevy]] or host app)
+- UI chroma (menus, search bar, settings) — handled by the shell ([[bevy]] or host app)
 - content sandboxing at T0 (WASM runtime caps) — deferred to a sandbox spec
 - LLM-assisted narration at T3/T0 — deferred to a separate overlay spec
 

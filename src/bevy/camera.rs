@@ -143,7 +143,7 @@ pub fn update_camera(
 
 /// Touch navigation: one finger orbits, two pan, pinch and twist.
 ///
-/// Touches inside `input_inset` belong to the host's chrome — the camera
+/// Touches inside `input_inset` belong to the host's chroma — the camera
 /// never sees them, so a thumb on the tab strip does not spin the graph.
 fn apply_touch(cam: &mut GraphCamera, touches: &Touches) {
     let [top, bottom, left, right] = cam.input_inset;

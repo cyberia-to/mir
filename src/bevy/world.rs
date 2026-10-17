@@ -278,8 +278,10 @@ pub fn sync_visible_entities(mut gpu: ResMut<GpuBuffers>, cam: Res<GraphCamera>)
         &edge_list,
         &weights,
         &gpu.pos_cpu,
+        &gpu.col_cpu,
         &camera,
         gpu.viewport,
+        visible.len(),
     );
     gpu.edge_list = edge_list;
     gpu.edge_weights = weights;
@@ -312,7 +314,31 @@ pub fn dispatch_tiers(
     // dispatch and mapped (asynchronously) by the reader — nothing else.
     if gpu.frame_u8.as_ref().map(|b| b.size()) != Some(pixel_count * 4) {
         let Some(dev) = &gpu.gpu else { return };
-        match dev.buffer(pixel_count * 4) {
+        let bytes = pixel_count * 4;
+        #[cfg(target_vendor = "apple")]
+        {
+            let wrapped = unimem::Block::open(bytes)
+                .ok()
+                .and_then(|block| dev.wrap(&block).ok().map(|buf| (block, buf)));
+            match wrapped {
+                Some((block, buf)) => {
+                    gpu.frame_block = Some(block);
+                    gpu.frame_u8 = Some(buf);
+                }
+                None => match dev.buffer(bytes) {
+                    Ok(b8) => {
+                        gpu.frame_block = None;
+                        gpu.frame_u8 = Some(b8);
+                    }
+                    Err(e) => {
+                        warn!("mir: frame buffer: {e}");
+                        return;
+                    }
+                },
+            }
+        }
+        #[cfg(not(target_vendor = "apple"))]
+        match dev.buffer(bytes) {
             Ok(b8) => gpu.frame_u8 = Some(b8),
             Err(e) => {
                 warn!("mir: frame buffer: {e}");
@@ -321,7 +347,6 @@ pub fn dispatch_tiers(
         }
     }
 
-    // One kernel, one command buffer, one submission per frame.
     let Some(cmd) = gpu.sync_queue.as_ref().and_then(|q| q.commands().ok()) else {
         return;
     };

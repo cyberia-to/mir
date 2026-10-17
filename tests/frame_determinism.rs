@@ -16,7 +16,7 @@
 
 use mir::bevy::resources::GraphCamera;
 use mir::frame::cull::TierLevel;
-use mir::frame::paint::{PaintPass, edge_segments, sort_by_depth};
+use mir::frame::paint::{edge_segments, sort_by_depth, PaintPass};
 
 const W: u32 = 320;
 const H: u32 = 240;
@@ -32,12 +32,32 @@ fn scene() -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<(u32, TierLevel)>) {
         // 3 sits exactly on 2 and 7 exactly on 6, so two pairs share a depth
         // to the last bit. Ties are where a sort's tie-breaking stops being
         // theoretical.
-        let a = match i { 3 => 2u32, 7 => 6, other => other } as f32 * 0.7;
-        positions.extend_from_slice(&[a.cos() * 700.0, a.sin() * 500.0,
-                                      (match i { 3 => 2u32, 7 => 6, o => o } % 4) as f32 * 300.0]);
+        let a = match i {
+            3 => 2u32,
+            7 => 6,
+            other => other,
+        } as f32
+            * 0.7;
+        positions.extend_from_slice(&[
+            a.cos() * 700.0,
+            a.sin() * 500.0,
+            (match i {
+                3 => 2u32,
+                7 => 6,
+                o => o,
+            } % 4) as f32
+                * 300.0,
+        ]);
         radii.push(180.0);
         colors.extend_from_slice(&[0.2, 0.5, 1.0]);
-        visible.push((i, if i % 2 == 0 { TierLevel::T2 } else { TierLevel::T3 }));
+        visible.push((
+            i,
+            if i % 2 == 0 {
+                TierLevel::T2
+            } else {
+                TierLevel::T3
+            },
+        ));
     }
     (positions, radii, colors, visible)
 }
@@ -72,16 +92,36 @@ fn render(visible: &[(u32, TierLevel)]) -> Vec<u8> {
     zipped.sort_unstable_by_key(|&(p, q, _)| (p, q));
     let edges: Vec<(u32, u32)> = zipped.iter().map(|&(p, q, _)| (p, q)).collect();
     let weights: Vec<f32> = zipped.iter().map(|&(_, _, w)| w).collect();
-    let segments = edge_segments(&edges, &weights, &positions, &gpu_cam, [W, H]);
+    let segments = edge_segments(
+        &edges,
+        &weights,
+        &positions,
+        &colors,
+        &gpu_cam,
+        [W, H],
+        ordered.len(),
+    );
 
     let gpu = mir::gpu::Gpu::open().expect("no GPU for the render test");
     let queue = gpu.new_command_queue().expect("command queue");
     let paint = PaintPass::new().expect("paint pipeline");
-    let dst = gpu.buffer((W as usize) * (H as usize) * 4).expect("frame buffer");
+    let dst = gpu
+        .buffer((W as usize) * (H as usize) * 4)
+        .expect("frame buffer");
     let cmd = queue.commands().expect("commands");
     paint
-        .draw(&sorted, &ordered, &positions, &radii, &colors,
-              &segments, &gpu_cam, [W, H], &dst, &cmd)
+        .draw(
+            &sorted,
+            &ordered,
+            &positions,
+            &radii,
+            &colors,
+            &segments,
+            &gpu_cam,
+            [W, H],
+            &dst,
+            &cmd,
+        )
         .expect("draw");
     cmd.submit();
 
@@ -91,7 +131,10 @@ fn render(visible: &[(u32, TierLevel)]) -> Vec<u8> {
 }
 
 fn differing_pixels(a: &[u8], b: &[u8]) -> usize {
-    a.chunks_exact(4).zip(b.chunks_exact(4)).filter(|(p, q)| p != q).count()
+    a.chunks_exact(4)
+        .zip(b.chunks_exact(4))
+        .filter(|(p, q)| p != q)
+        .count()
 }
 
 #[test]

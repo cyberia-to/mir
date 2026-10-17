@@ -55,37 +55,6 @@ impl EdgePass {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn advances_and_wraps_offsets() {
-        let mut pass = EdgePass::new(2);
-        pass.update_flow_uvs(&[0.5, -0.5], 1.0);
-        assert_eq!(pass.flow_offsets(), &[0.5, 0.5]);
-    }
-
-    #[test]
-    fn resize_grows_and_shrinks_with_zero_fill() {
-        let mut pass = EdgePass::new(1);
-        pass.resize(3);
-        assert_eq!(pass.flow_offsets(), &[0.0, 0.0, 0.0]);
-        pass.resize(1);
-        assert_eq!(pass.flow_offsets(), &[0.0]);
-    }
-
-    #[test]
-    #[should_panic(expected = "offset buffer length != edge_weights length")]
-    fn mismatched_edge_weights_panics_instead_of_silently_zipping_short() {
-        // Without the length check, `zip` would silently advance only the
-        // first offset and drop the rest of `edge_weights`, even in a
-        // release build where `debug_assert!` compiles out.
-        let mut pass = EdgePass::new(3);
-        pass.update_flow_uvs(&[0.5, -0.5], 1.0);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // MSL compute shader: generate instanced tube geometry for visible edges.
 // ---------------------------------------------------------------------------
@@ -201,3 +170,34 @@ vertex VertexOut tube_vert(
     return out;
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advances_and_wraps_offsets() {
+        let mut pass = EdgePass::new(2);
+        pass.update_flow_uvs(&[0.5, -0.5], 1.0);
+        assert_eq!(pass.flow_offsets(), &[0.5, 0.5]);
+    }
+
+    #[test]
+    fn resize_grows_and_shrinks_with_zero_fill() {
+        let mut pass = EdgePass::new(1);
+        pass.resize(3);
+        assert_eq!(pass.flow_offsets(), &[0.0, 0.0, 0.0]);
+        pass.resize(1);
+        assert_eq!(pass.flow_offsets(), &[0.0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "offset buffer length != edge_weights length")]
+    fn mismatched_edge_weights_panics_instead_of_silently_zipping_short() {
+        // Without the length check, `zip` would silently advance only the
+        // first offset and drop the rest of `edge_weights`, even in a
+        // release build where `debug_assert!` compiles out.
+        let mut pass = EdgePass::new(3);
+        pass.update_flow_uvs(&[0.5, -0.5], 1.0);
+    }
+}

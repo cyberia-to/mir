@@ -24,6 +24,7 @@ pub use wgpu_arm::{
 /// this must hold in release builds too. Free function (not inlined into
 /// `wgpu_arm`, which only compiles `#[cfg(not(target_vendor = "apple"))]`)
 /// so it stays unit-testable on Apple hardware as well.
+#[cfg_attr(target_vendor = "apple", allow(dead_code))]
 pub(crate) fn assert_f32_aligned(addr: usize) {
     assert_eq!(addr % 4, 0, "mapped range under-aligned");
 }
@@ -36,6 +37,7 @@ pub(crate) fn assert_f32_aligned(addr: usize) {
 /// hold in release builds too. Free function (not inlined into `wgpu_arm`,
 /// which only compiles `#[cfg(not(target_vendor = "apple"))]`) so it stays
 /// unit-testable on Apple hardware as well.
+#[cfg_attr(target_vendor = "apple", allow(dead_code))]
 pub(crate) fn assert_whole_buffer_offset(offset: usize) {
     assert_eq!(offset, 0, "facade carries whole-buffer bindings");
 }

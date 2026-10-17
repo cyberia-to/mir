@@ -215,51 +215,6 @@ fn decode_visible_entries(count: usize, b: &[u8]) -> Vec<(u32, TierLevel)> {
     v
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn entry_bytes(idx: u32, tier: u32) -> [u8; 8] {
-        let mut out = [0u8; 8];
-        out[..4].copy_from_slice(&idx.to_le_bytes());
-        out[4..].copy_from_slice(&tier.to_le_bytes());
-        out
-    }
-
-    #[test]
-    fn decode_visible_entries_reads_in_order() {
-        let mut b = Vec::new();
-        b.extend_from_slice(&entry_bytes(7, 0));
-        b.extend_from_slice(&entry_bytes(3, 4));
-        let entries = decode_visible_entries(2, &b);
-        assert_eq!(entries, vec![(7, TierLevel::T0), (3, TierLevel::TInf)]);
-    }
-
-    #[test]
-    fn decode_visible_entries_stops_at_buffer_end() {
-        // count claims 3 entries but the buffer only holds 1 — the
-        // existing per-entry bounds check must still cut the loop short.
-        let b = entry_bytes(9, 2);
-        let entries = decode_visible_entries(3, &b);
-        assert_eq!(entries, vec![(9, TierLevel::T2)]);
-    }
-
-    #[test]
-    fn decode_visible_entries_caps_preallocation_on_a_huge_count() {
-        // A corrupted or stale readback count (u32::MAX) must not drive an
-        // allocation anywhere near that size — only what the buffer holds.
-        let b = entry_bytes(1, 1);
-        let entries = decode_visible_entries(u32::MAX as usize, &b);
-        assert_eq!(entries, vec![(1, TierLevel::T1)]);
-    }
-
-    #[test]
-    fn decode_visible_entries_empty_count() {
-        let b: [u8; 0] = [];
-        assert!(decode_visible_entries(0, &b).is_empty());
-    }
-}
-
 // ── MSL shader ──────────────────────────────────────────────────────────────
 
 pub const BVH_CULL_MSL: &str = r#"
@@ -482,3 +437,48 @@ fn bvh_cull(@builtin(global_invocation_id) gid3: vec3<u32>) {
     visible_out[slot] = vec2<u32>(gid, tier);
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry_bytes(idx: u32, tier: u32) -> [u8; 8] {
+        let mut out = [0u8; 8];
+        out[..4].copy_from_slice(&idx.to_le_bytes());
+        out[4..].copy_from_slice(&tier.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn decode_visible_entries_reads_in_order() {
+        let mut b = Vec::new();
+        b.extend_from_slice(&entry_bytes(7, 0));
+        b.extend_from_slice(&entry_bytes(3, 4));
+        let entries = decode_visible_entries(2, &b);
+        assert_eq!(entries, vec![(7, TierLevel::T0), (3, TierLevel::TInf)]);
+    }
+
+    #[test]
+    fn decode_visible_entries_stops_at_buffer_end() {
+        // count claims 3 entries but the buffer only holds 1 — the
+        // existing per-entry bounds check must still cut the loop short.
+        let b = entry_bytes(9, 2);
+        let entries = decode_visible_entries(3, &b);
+        assert_eq!(entries, vec![(9, TierLevel::T2)]);
+    }
+
+    #[test]
+    fn decode_visible_entries_caps_preallocation_on_a_huge_count() {
+        // A corrupted or stale readback count (u32::MAX) must not drive an
+        // allocation anywhere near that size — only what the buffer holds.
+        let b = entry_bytes(1, 1);
+        let entries = decode_visible_entries(u32::MAX as usize, &b);
+        assert_eq!(entries, vec![(1, TierLevel::T1)]);
+    }
+
+    #[test]
+    fn decode_visible_entries_empty_count() {
+        let b: [u8; 0] = [];
+        assert!(decode_visible_entries(0, &b).is_empty());
+    }
+}

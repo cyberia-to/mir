@@ -717,17 +717,17 @@ impl PaintPass {
 
         let enc = cmd.encoder()?;
         enc.bind(&self.pipeline);
-        enc.bind_buffer(&splat_buf, 0, 0);
-        enc.bind_buffer(&sphere_buf, 0, 1);
-        enc.bind_buffer(&seg_buf, 0, 2);
+        enc.bind_buffer(splat_buf, 0, 0);
+        enc.bind_buffer(sphere_buf, 0, 1);
+        enc.bind_buffer(seg_buf, 0, 2);
         enc.bind_buffer(dst, 0, 3);
         enc.push(camera_bytes, 4);
         enc.push(&counts_bytes, 5);
         enc.push(&vp_bytes, 6);
-        enc.bind_buffer(&tile_start_buf, 0, 7);
-        enc.bind_buffer(&tile_ids_buf, 0, 8);
-        enc.bind_buffer(&splat_start_buf, 0, 9);
-        enc.bind_buffer(&splat_ids_buf, 0, 10);
+        enc.bind_buffer(tile_start_buf, 0, 7);
+        enc.bind_buffer(tile_ids_buf, 0, 8);
+        enc.bind_buffer(splat_start_buf, 0, 9);
+        enc.bind_buffer(splat_ids_buf, 0, 10);
         enc.launch((w as usize, h as usize, 1), (16, 16, 1));
         enc.finish();
         Ok(())
